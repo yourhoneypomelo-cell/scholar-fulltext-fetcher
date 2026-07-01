@@ -518,21 +518,71 @@ def _serpapi_result(item: Optional[Dict[str, Any]], position_fallback: Optional[
     )
 
 
-def parse_serpapi(data: Dict[str, Any]) -> List[ScholarResult]:
-    """解析 SerpApi Google Scholar 完整响应的 ``organic_results`` → List[ScholarResult]。
+def _serpapi_result_from_parsed(item: Optional[Dict[str, Any]],
+                                position_fallback: Optional[int] = None) -> ScholarResult:
+    """把 B1 ``scholar_serpapi.ScholarResult.to_dict()``(**已解析**条目)归一到本包 ScholarResult。
 
-    迁移自 B1 ``scholar_serpapi.parse_organic_results``,字段收敛到 scholar.models.ScholarResult。
-    对 None / 非 dict / 缺字段一律优雅处理,绝不抛异常。
+    与 ``_serpapi_result``(解析**原始** organic_result)的关键区别:此处输入已是解析后的扁平
+    结构 —— ``publication_info`` 已是摘要串、``cited_by``/``versions`` 已是数值、``pdf_links``
+    已抽好,故直接取用;仅从摘要串补 B1 视图未含的 year/venue。防御式,绝不抛。
     """
-    if not isinstance(data, dict):
-        return []
+    item = item or {}
+    summary = item.get("publication_info")
+    api_authors = [a for a in (item.get("authors") or []) if a]
+    parsed_authors, venue, year = _parse_pubinfo(summary or "")
+    pos = _to_int_any(item.get("position"))
+    return ScholarResult(
+        title=item.get("title"),
+        link=item.get("link"),
+        result_id=item.get("result_id"),
+        snippet=item.get("snippet"),
+        publication_info=summary,
+        authors=api_authors or parsed_authors,
+        year=year,
+        venue=venue,
+        cited_by=_to_int_any(item.get("cited_by")),
+        versions=_to_int_any(item.get("versions")),
+        cluster_id=item.get("cluster_id"),
+        pdf_links=list(item.get("pdf_links") or []),
+        resources=list(item.get("resources") or []),
+        position=pos if pos is not None else position_fallback,
+        origin="serpapi",
+    )
+
+
+def _parse_serpapi_items(items: Any, mapper: Any) -> List[ScholarResult]:
+    """逐条映射(每条独立 try,单条异常跳过、不拖累整批)。"""
     out: List[ScholarResult] = []
-    for i, item in enumerate(data.get("organic_results") or []):
+    for i, item in enumerate(items or []):
         try:
-            out.append(_serpapi_result(item, i))
+            out.append(mapper(item, i))
         except Exception:  # noqa: BLE001 - 单条异常跳过,不拖累整批
             continue
     return out
+
+
+def parse_serpapi(data: Dict[str, Any]) -> List[ScholarResult]:
+    """解析 SerpApi Google Scholar 结果 → List[ScholarResult],兼容两种输入形态。
+
+    ① **原始 SerpApi 完整响应**:``{"organic_results": [<未解析条目>, ...]}`` ——
+       迁移自 B1 ``scholar_serpapi.parse_organic_results``,每条走 ``_serpapi_result`` 解析。
+    ② **B1 ``scholar_serpapi.search_scholar`` 信封**:
+       ``{"available": True, "results": [<已解析 ScholarResult.to_dict()>, ...]}`` ——
+       子包 ``fetcher.SerpApiEngine`` 旁路即产出此形态(把 search_scholar 返回整体
+       ``json.dumps`` 进 ``FetchOutcome.html``),每条走 ``_serpapi_result_from_parsed`` 归一。
+
+    ⚠️ 兼容 ② 是必需的:线上 serpapi 模式**只会**得到信封形态;此前仅认 ``organic_results``
+    导致 serpapi 模式恒 0 结果。对 None / 非 dict / 缺字段一律优雅处理,绝不抛异常。
+    """
+    if not isinstance(data, dict):
+        return []
+    raw_items = data.get("organic_results")
+    if raw_items:
+        return _parse_serpapi_items(raw_items, _serpapi_result)
+    pre_items = data.get("results")
+    if isinstance(pre_items, list):
+        return _parse_serpapi_items(pre_items, _serpapi_result_from_parsed)
+    return []
 
 
 def detect_captcha(html: Optional[str], url: Optional[str] = None,
@@ -773,6 +823,39 @@ def _selftest() -> int:
     assert sr[1].year == 2020, sr[1].year
     assert sr[2].title == "Bare entry" and sr[2].pdf_links == [] and sr[2].authors == [], sr[2]
     assert parse_serpapi({}) == [] and parse_serpapi(None) == []  # type: ignore[arg-type]
+
+    # ⑥ parse_serpapi —— 兼容 B1 search_scholar 信封({"results": [<已解析条目>]},非 organic_results)。
+    # 这是线上 serpapi 模式的**唯一**输入形态:fetcher.SerpApiEngine 把 search_scholar 返回整体
+    # json.dumps 进 outcome.html;此前只认 organic_results → serpapi 模式恒 0 结果(回归防护)。
+    serpapi_envelope: Dict[str, Any] = {
+        "available": True, "query": "attention", "count": 2,
+        "results": [
+            {"title": "Attention is all you need", "link": "https://pub.example.com/attention",
+             "result_id": "abc123", "snippet": "We propose ... the Transformer ...",
+             "publication_info": "A Vaswani, N Shazeer - Advances in NIPS, 2017 - proceedings.example.com",
+             "authors": ["A Vaswani", "N Shazeer"], "cited_by": 123456, "versions": 42,
+             "pdf_links": ["https://example.com/attention.pdf"],
+             "resources": [{"title": "example.com", "file_format": "PDF",
+                            "link": "https://example.com/attention.pdf"}],
+             "position": 0},
+            {"title": "Bare entry", "link": None, "result_id": None, "snippet": None,
+             "publication_info": None, "authors": [], "cited_by": None, "versions": None,
+             "pdf_links": [], "resources": [], "position": 1},
+        ],
+    }
+    ev = parse_serpapi(serpapi_envelope)
+    assert len(ev) == 2 and all(isinstance(x, ScholarResult) for x in ev), ev
+    assert ev[0].origin == "serpapi" and ev[0].title == "Attention is all you need", ev[0]
+    assert ev[0].link == "https://pub.example.com/attention" and ev[0].result_id == "abc123", ev[0]
+    assert ev[0].authors == ["A Vaswani", "N Shazeer"], ev[0].authors
+    assert ev[0].cited_by == 123456 and ev[0].versions == 42, (ev[0].cited_by, ev[0].versions)
+    assert ev[0].pdf_links == ["https://example.com/attention.pdf"], ev[0].pdf_links
+    assert ev[0].year == 2017 and ev[0].venue == "Advances in NIPS", (ev[0].year, ev[0].venue)
+    assert ev[0].position == 0, ev[0].position
+    assert ev[1].title == "Bare entry" and ev[1].pdf_links == [] and ev[1].authors == [], ev[1]
+    # 空 results / 默认关闭信封(available=False)→ 均优雅得 []
+    assert parse_serpapi({"available": True, "results": []}) == []
+    assert parse_serpapi({"available": False, "reason": "need SERPAPI_KEY", "results": []}) == []
 
     print("SERP_OK")
     return 0

@@ -18,18 +18,30 @@ def setup_logging(out_dir: str, level: str = "INFO") -> logging.Logger:
     os.makedirs(out_dir, exist_ok=True)
     logger = logging.getLogger("fulltext_fetcher")
     logger.setLevel(getattr(logging, str(level).upper(), logging.INFO))
+    # 先关闭旧 handler 再清空:同一命名 logger 被多次 setup(多 Pipeline / 测试反复建实例)时,
+    # 仅 clear() 会把旧 FileHandler 从列表摘除却不关闭其文件句柄,导致 run.log 句柄泄漏
+    # (Windows 上还会锁住 out_dir 妨碍清理)。
+    for h in logger.handlers[:]:
+        try:
+            h.close()
+        except Exception:  # noqa: BLE001 - 关闭旧 handler 不得影响重新初始化日志
+            pass
     logger.handlers.clear()
     logger.propagate = False
 
     fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", "%H:%M:%S")
 
-    fh = logging.FileHandler(os.path.join(out_dir, "run.log"), encoding="utf-8")
+    # run.log 强制 UTF-8 写入(errors=backslashreplace 兜底:极端不可编码字符降级为转义,
+    # 绝不因编码抛错或写坏,保证"跑完读日志判断"始终可读)。
+    fh = logging.FileHandler(os.path.join(out_dir, "run.log"), encoding="utf-8",
+                             errors="backslashreplace")
     fh.setFormatter(fmt)
     logger.addHandler(fh)
 
-    # 控制台:尽量用 UTF-8,避免 Windows GBK 终端中文乱码(不影响文件输出)。
+    # 控制台:优先 UTF-8;errors=backslashreplace 做平台安全降级——在 Windows cp936/GBK 等终端上
+    # 不因不可编码字符崩溃(reconfigure 不可用时静默退回原编码,由 logging 自身容错兜底)。
     try:
-        sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+        sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")  # type: ignore[attr-defined]
     except Exception:
         pass
     ch = logging.StreamHandler(sys.stderr)

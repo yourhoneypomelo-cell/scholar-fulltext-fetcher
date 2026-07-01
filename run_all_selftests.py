@@ -40,9 +40,11 @@ CHECKS = [
     ("landing",            ["fulltext_fetcher.landing"],                                                 [],             "SELFTEST_OK"),
     ("cli",                ["fulltext_fetcher.cli"],                                                     ["--selftest"], "CLI_OK"),
     ("resolve",            ["fulltext_fetcher.resolve"],                                                 [],             "RESOLVE_OK"),
+    ("http_client",        ["fulltext_fetcher.http_client"],                                             [],             "HTTP_CLIENT_OK"),
     ("aggregators",        ["fulltext_fetcher.sources.aggregators"],                                     [],             "AGGREGATORS_OK"),
     ("report",             ["fulltext_fetcher.report"],                                                  [],             "REPORT_OK"),
     ("download",           ["fulltext_fetcher.download"],                                                [],             "DOWNLOAD_OK"),
+    ("pipeline",           ["fulltext_fetcher.pipeline"],                                                [],             "PIPELINE_OK"),
     ("publisher_adapter",  ["fulltext_fetcher.publisher_adapter"],                                       [],             "PUBLISHER_ADAPTER_OK"),
     ("green_oa",           ["fulltext_fetcher.sources.green_oa", "fulltext_fetcher.green_oa"],           [],             "GREEN_OA_OK"),
     ("zotero",             ["fulltext_fetcher.zotero", "fulltext_fetcher.sources.zotero"],               [],             "ZOTERO_OK"),
@@ -63,10 +65,24 @@ CHECKS = [
     ("scholar.fetcher",    ["fulltext_fetcher.scholar.fetcher"],      [], "FETCHER_OK"),
     ("scholar.download",   ["fulltext_fetcher.scholar.download"],     [], "SCH_DOWNLOAD_OK"),
     ("scholar.naming",     ["fulltext_fetcher.scholar.naming"],       [], "NAMING_OK"),
+    ("scholar.pipeline",   ["fulltext_fetcher.scholar.pipeline"],     [], "SCHOLAR_PIPELINE_OK"),
     ("scholar.e2e",        ["fulltext_fetcher.scholar.selftest_e2e"], [], "SCHOLAR_E2E_OK"),
 
     # —— 其它增强模块 ——
     ("aio",                ["fulltext_fetcher.aio"],                  [], "AIO_OK"),
+    ("render_fetch",       ["fulltext_fetcher.render_fetch"],         [], "RENDER_OK"),
+
+    # —— 免费拿 PDF 方法(搜索引擎/无头浏览器/出版商直链/存档/Cloudflare;均离线 selftest)——
+    ("free_adapters",      ["fulltext_fetcher.sources.free_adapters"],                                    [], "FREE_ADAPTERS_OK"),
+    ("websearch",          ["fulltext_fetcher.sources.websearch", "fulltext_fetcher.websearch"],          [], "WEBSEARCH_OK"),
+    ("oa_button",          ["fulltext_fetcher.sources.oa_button", "fulltext_fetcher.oa_button"],          [], "OA_BUTTON_OK"),
+    ("publisher_oa",       ["fulltext_fetcher.sources.publisher_oa", "fulltext_fetcher.publisher_oa"],    [], "PUBLISHER_OA_OK"),
+    ("publisher_direct",   ["fulltext_fetcher.sources.publisher_direct", "fulltext_fetcher.publisher_direct"], [], "PUBLISHER_DIRECT_OK"),
+    ("wayback",            ["fulltext_fetcher.sources.wayback", "fulltext_fetcher.wayback"],              [], "WAYBACK_OK"),
+    ("preprints",          ["fulltext_fetcher.sources.preprints", "fulltext_fetcher.preprints"],          [], "PREPRINTS_OK"),
+    ("browser_search",     ["fulltext_fetcher.browser_search"],                                           [], "BROWSER_SEARCH_OK"),
+    ("flaresolverr",       ["fulltext_fetcher.flaresolverr"],                                             [], "FLARESOLVERR_OK"),
+    ("bench_free_methods", ["fulltext_fetcher.bench_free_methods", "bench_free_methods"],                 [], "BENCH_OK"),
 ]
 
 

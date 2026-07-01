@@ -67,6 +67,37 @@ class _FakeSerpEngine(FetchEngine):
                             engine="curl_cffi")
 
 
+class _FakeSerpApiEngine(FetchEngine):
+    """注入引擎：模拟 B1 ``scholar_serpapi.search_scholar`` 的**信封**返回（旁路 HTML=JSON）。
+
+    生产里 ``SerpApiEngine`` 把 search_scholar 的返回整体 ``json.dumps`` 进 ``outcome.html``
+    （形如 ``{"available":True,"results":[<已解析条目>]}``）。这里不联网、不需 key，直接产出
+    同形态信封，驱动真实 pipeline 的 serpapi 解析→选择→下载全链路。
+    """
+
+    name = "serpapi"
+
+    def available(self) -> bool:
+        return True
+
+    def get(self, target, ctx):  # noqa: ANN001, ARG002
+        envelope = {
+            "available": True, "query": target, "count": 1,
+            "results": [{
+                "title": "Attention is all you need",
+                "link": "https://pub.example.com/attention",
+                "result_id": "CID1", "snippet": "We propose the Transformer ...",
+                "publication_info": "A Vaswani, N Shazeer - Advances in NeurIPS, 2017 - proceedings.example.com",
+                "authors": ["A Vaswani", "N Shazeer"], "cited_by": 1000, "versions": 5,
+                "pdf_links": [_PDF_URL],
+                "resources": [{"title": "oa.example.org", "file_format": "PDF", "link": _PDF_URL}],
+                "position": 0,
+            }],
+        }
+        return FetchOutcome(ok=True, html=json.dumps(envelope, ensure_ascii=False),
+                            final_url="serpapi://google_scholar", status=200, engine="serpapi")
+
+
 class _FakeResp:
     """最小可用假响应（够父包 download_pdf 消费即可）。"""
 
@@ -137,6 +168,43 @@ def _make_pipeline(out_dir: str, *, routes) -> ScholarPipeline:
                            client=_FakeClient(routes), proxy=None)
 
 
+def _selftest_serpapi_e2e() -> None:
+    """serpapi 模式端到端回归:SerpApiEngine 旁路(search_scholar 信封 JSON)→ serp.parse_serpapi
+    → _select_best → download → naming 落盘。锁定『信封形态被正确解析』——此前 parse_serpapi 只认
+    ``organic_results`` 键,导致 serpapi 模式解析恒 0 结果、成功率归零。注入 fake 引擎/client,
+    不联网、不需 SERPAPI_KEY。"""
+    d = tempfile.mkdtemp(prefix="scholar_serpapi_e2e_")
+    try:
+        cfg = ScholarConfig(
+            mode="serpapi", serpapi_key="OFFLINE_TEST_KEY", out_dir=d, concurrency=1,
+            page_interval_low=0.0, page_interval_high=0.0, backoff_base=0.0, backoff_cap=0.0,
+            cooldown_after_block=0.0, oa_fallback=False, captcha_enabled=False,
+            proxy_enabled=False, email="selftest@example.org", log_level="ERROR",
+        )
+        pipe = ScholarPipeline(
+            cfg, engines={"serpapi": _FakeSerpApiEngine()},
+            client=_FakeClient({_PDF_URL: (_PDF_BYTES, "application/pdf", 200)}), proxy=None,
+        )
+        summary = pipe.run(["Attention is all you need"])
+
+        assert summary["mode"] == "serpapi", summary
+        assert summary["processed"] == 1 and summary["success"] == 1, summary
+        assert summary["by_engine"].get("serpapi") == 1, summary
+        assert summary["by_source"].get("scholar-pdf") == 1, summary
+
+        assert len(pipe.results) == 1, pipe.results
+        fr = pipe.results[0]
+        assert fr.success is True, fr.to_dict()
+        assert fr.engine_used == "serpapi", fr.engine_used
+        assert fr.n_results == 1, fr.n_results               # ← 信封被正确解析(否则为 0)
+        assert fr.cited_by == 1000, fr.cited_by
+        assert fr.pdf_url == _PDF_URL, fr.pdf_url
+        assert fr.pdf_path and os.path.isfile(fr.pdf_path), fr.pdf_path
+        assert os.path.basename(fr.pdf_path).startswith("2017_Vaswani_Attention"), fr.pdf_path
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def run_offline_e2e() -> int:
     d = tempfile.mkdtemp(prefix="scholar_e2e_")
     try:
@@ -193,6 +261,9 @@ def run_offline_e2e() -> int:
 
         # ⑤ _select_best 最低相似度阈值回归(避免模糊标题误选不相关结果)
         _selftest_select_best()
+
+        # ⑥ serpapi 模式端到端回归(SerpApiEngine 信封解析 → 下载 → 命名)
+        _selftest_serpapi_e2e()
     finally:
         shutil.rmtree(d, ignore_errors=True)
 

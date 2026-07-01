@@ -9,6 +9,8 @@ from . import aggregators  # noqa: F401
 from . import repositories  # noqa: F401
 from . import green_oa  # noqa: F401
 from . import scihub  # noqa: F401
+from . import free_adapters  # noqa: F401  (免费方法源:publisher_oa/oa_button/websearch/wayback/browser_search)
+from . import publisher_direct  # noqa: F401  (机构订阅直链源:默认关,--institutional 开启)
 
 
 def build_sources(cfg: Any) -> List[BaseSource]:

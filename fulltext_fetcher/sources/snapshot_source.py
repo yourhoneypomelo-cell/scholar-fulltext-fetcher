@@ -23,7 +23,11 @@ class Snapshot(BaseSource):
         db = getattr(ctx.cfg, "snapshot_db", None)
         if not db:
             return []
-        rec = snap.lookup(db, paper.doi)
+        try:
+            rec = snap.lookup(db, paper.doi)
+        except Exception as e:  # noqa: BLE001 - 本地快照异常(库损坏/all_pdfs JSON 解析失败等)须静默降级到在线源,不得拖垮本条
+            ctx.log.debug("snapshot lookup 失败,降级跳过: %s", e)
+            return []
         if not rec:
             return []
         out: List[PdfCandidate] = []

@@ -8,7 +8,8 @@
   ③ 源给的"直链"返回 HTML 落地页 → landing 抠出内嵌 PDF 直链并二次下载成功;
   ④ 全源无候选 → result 失败且 error 合理、attempts 记录所有被试源;
   ⑤ run() 跑完 out_dir 生成 summary.json / results.csv / report.html 且字段正确;
-  ⑥ 断点续跑:已成功输入第二次运行被跳过(不再发起任何请求)。
+  ⑥ 断点续跑:已成功输入第二次运行被跳过(不再发起任何请求);
+  ⑦ 断点续跑失败分流:上次「永久失败」默认跳过、临时失败默认重跑,--retry-failed 时永久失败也重跑。
 
 跑法: python -m fulltext_fetcher.selftest_e2e   → 打印 E2E_OK
 约束:纯标准库 + 现有包、零联网、只新增本文件;**未修改 config.py / http_client.py**
@@ -237,7 +238,7 @@ def test_miss() -> None:
     try:
         r = pipe.process_one(doi, 0)
         assert r.success is False, r.source_used
-        assert r.error == "no-downloadable-pdf", r.error
+        assert r.error == "no-candidates", r.error   # 全源零候选 → 精确归因(替代旧的通用 no-downloadable-pdf)
         assert [a.source for a in r.attempts] == ["unpaywall", "openalex", "crossref"], \
             [a.source for a in r.attempts]
     finally:
@@ -316,6 +317,46 @@ def test_resume() -> None:
         _teardown(pipe2, d)
 
 
+def test_resume_retry_failed() -> None:
+    '''⑦ 断点续跑失败分流:上次「永久失败」默认跳过、临时失败默认重跑;--retry-failed 时永久失败也重跑。'''
+    perm_doi = '10.1000/perm'       # 上次永久失败(download-failed:http-403,不命中 _RETRIABLE_ERROR_HINTS)
+    trans_doi = '10.1000/trans'     # 上次临时失败(no-response,命中 _RETRIABLE_ERROR_HINTS)
+    d = tempfile.mkdtemp(prefix='e2e_rf_')
+
+    def _seed(records) -> None:
+        with open(os.path.join(d, 'metadata.jsonl'), 'w', encoding='utf-8') as f:
+            for rec in records:
+                f.write(json.dumps(rec, ensure_ascii=False) + chr(10))
+
+    # (A) 默认 retry_failed=False:永久失败跳过、临时失败重跑
+    _seed([
+        {'raw_input': perm_doi, 'success': False, 'error': 'download-failed:http-403'},
+        {'raw_input': trans_doi, 'success': False, 'error': 'no-response'},
+    ])
+    fake_a = FakeClient(json_routes={}, get_routes={})   # 重跑者拿空路由→再次 miss,但会产生调用
+    pipe_a = _make_pipeline(d, fake_a)                   # resume 默认 True、retry_failed 默认 False
+    try:
+        s = pipe_a.run([perm_doi, trans_doi])
+        assert s['skipped_resume'] == 1, s              # 仅跳过 1 条(永久失败)
+        assert s['processed'] == 1, s                   # 仅重跑 1 条(临时失败)
+        assert not any(perm_doi in u for u in fake_a.json_calls), fake_a.json_calls
+        assert any(trans_doi in u for u in fake_a.json_calls), fake_a.json_calls
+    finally:
+        _release(pipe_a)   # 关句柄、保留 out_dir 供 (B) 读
+
+    # (B) retry_failed=True(--retry-failed):永久失败也重跑
+    _seed([{'raw_input': perm_doi, 'success': False, 'error': 'download-failed:http-403'}])
+    fake_b = FakeClient(json_routes={}, get_routes={})
+    pipe_b = _make_pipeline(d, fake_b, retry_failed=True)
+    try:
+        s2 = pipe_b.run([perm_doi])
+        assert s2['skipped_resume'] == 0, s2            # 永久失败不再跳过
+        assert s2['processed'] == 1, s2
+        assert any(perm_doi in u for u in fake_b.json_calls), fake_b.json_calls
+    finally:
+        _teardown(pipe_b, d)
+
+
 def main() -> int:
     test_shortcircuit()
     test_fallback()
@@ -323,6 +364,7 @@ def main() -> int:
     test_miss()
     test_artifacts_and_summary()
     test_resume()
+    test_resume_retry_failed()
     print("E2E_OK")
     return 0
 

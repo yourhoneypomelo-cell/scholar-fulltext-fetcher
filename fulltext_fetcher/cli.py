@@ -140,6 +140,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--snapshot-db", default=os.environ.get("FULLTEXT_SNAPSHOT_DB"),
                    help="本地快照 SQLite 路径(由 python -m fulltext_fetcher.ingest 生成);"
                         "配置后 DOI 先走本地、零额度零限速")
+    p.add_argument("--institutional", action="store_true",
+                   help="启用机构订阅直链源 publisher_direct(对订阅/混合出版商也构造 PDF 直链)。"
+                        "仅供拥有合法机构订阅、对内容有访问权者使用;无订阅时直链会 401/403 被 %PDF 校验过滤")
     p.add_argument("--enable-scihub", action="store_true",
                    help="启用 Sci-Hub 兜底(注意:合规风险,默认关闭)")
     p.add_argument("--scihub-mirror", default="https://sci-hub.se")
@@ -173,16 +176,28 @@ def main(argv: List[str] | None = None) -> int:
         oa_only=args.oa_only,
         no_download=args.no_download,
         resume=not args.no_resume,
+        retry_failed=args.retry_failed,
+        institutional=args.institutional,
         enable_scihub=args.enable_scihub,
         scihub_mirror=args.scihub_mirror,
         log_level=args.log_level,
     )
     if args.sources:
         cfg.sources = [s.strip() for s in args.sources.split(",") if s.strip()]
+    # 机构模式:把 publisher_direct 接入源顺序(置于免费 OA 源之后、兜底 websearch 之前);
+    # 非机构模式绝不注入,避免每条 DOI 多一条 0 候选的空尝试。该源自身也按 cfg.institutional 二次把关。
+    if cfg.institutional and "publisher_direct" not in cfg.sources:
+        if "websearch" in cfg.sources:
+            cfg.sources.insert(cfg.sources.index("websearch"), "publisher_direct")
+        else:
+            cfg.sources.append("publisher_direct")
 
     pipe = Pipeline(cfg)
     if cfg.email_is_placeholder():
         pipe.log.warning("未提供真实邮箱:Unpaywall 可能返回 422,建议加 --email you@uni.edu")
+    if cfg.institutional:
+        pipe.log.warning("已启用机构订阅直链源 publisher_direct:仅供拥有合法机构订阅、"
+                         "对内容有访问权者使用;无订阅的直链会 401/403 被 %PDF 校验过滤。")
     if cfg.enable_scihub:
         pipe.log.warning("注意:已启用 Sci-Hub 兜底,存在合规/法律风险,使用者自负。")
 

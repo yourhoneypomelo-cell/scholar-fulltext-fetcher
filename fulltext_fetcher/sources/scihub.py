@@ -26,9 +26,11 @@ class SciHub(BaseSource):
         return bool(paper.doi)
 
     def find_candidates(self, paper: Paper, ctx: SourceContext) -> List[PdfCandidate]:
-        if not ctx.cfg.enable_scihub:
+        if not getattr(ctx.cfg, "enable_scihub", False):
             return []
-        mirror = ctx.cfg.scihub_mirror.rstrip("/")
+        mirror = (getattr(ctx.cfg, "scihub_mirror", None) or "").rstrip("/")
+        if not mirror:
+            return []  # 启用但镜像未配置:优雅降级,避免用 None 拼出非法 URL 而崩溃
         url = f"{mirror}/{paper.doi}"
         try:
             r = ctx.client.get(url)

@@ -28,7 +28,10 @@ def classify_input(raw: str) -> WorkInput:
         tail = tail.replace(".pdf", "")
         return WorkInput(raw, "arxiv", tail)
     if "doi.org/" in low:
-        return WorkInput(raw, "doi", s.split("doi.org/", 1)[1].strip())
+        # 用小写副本定位、切原串:避免大小写不一致(如 https://DOI.ORG/…)时按小写字面量 split
+        # 落空返回单元素列表、取 [1] 触发 IndexError,导致该输入在 process_one 外被整条丢弃。
+        marker = "doi.org/"
+        return WorkInput(raw, "doi", s[low.index(marker) + len(marker):].strip())
     m = _DOI_RE.search(s)
     if m and (low.startswith("10.") or low.startswith("doi:")):
         return WorkInput(raw, "doi", m.group(0))
@@ -273,6 +276,9 @@ if __name__ == "__main__":  # 纯函数 selftest(不联网): python -m fulltext_
     assert ci("doi:10.1234/abcd").value == "10.1234/abcd"
     _w = ci("https://doi.org/10.1234/abcd")
     assert (_w.kind, _w.value) == ("doi", "10.1234/abcd"), (_w.kind, _w.value)
+    # 大小写混写的 doi.org host 不得崩溃(回归:曾按小写字面量 split 触发 IndexError)
+    _wU = ci("https://DOI.ORG/10.1234/ABCD")
+    assert (_wU.kind, _wU.value) == ("doi", "10.1234/ABCD"), (_wU.kind, _wU.value)
 
     # —— arXiv:前缀 / 纯 id / abs·pdf URL / 旧式分类号 ——
     assert ci("arXiv:2101.00001").kind == "arxiv"

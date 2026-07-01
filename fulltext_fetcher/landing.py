@@ -12,10 +12,15 @@ HTML 里真正的 PDF 地址抠出来,交给下游重试下载。
      的 contentUrl/url/downloadUrl —— schema.org ScholarlyArticle 常用,出版商页多见。
   3) <link rel=... type="application/pdf" href="..."> 或 href 指向 PDF 的 <link>。
   4) data-* 属性(data-pdf-url / data-download-url / data-src 等)中指向 PDF 的值。
-  5) 出版商专属 selector / 已知 PDF 路径模板(按落地页所属出版商域名启用):
-     Elsevier(sciencedirect,/pdfft、/pii/…pdf)、Springer(/content/pdf/…pdf)、
-     Wiley(/doi/pdf/、/doi/pdfdirect/)、ACS(/doi/pdf/)、RSC(articlepdf)、
-     IEEE(getPDF/stampPDF、/ielx…pdf)、MDPI(…/pdf)。
+  5) 出版商 / 机构库(仓储)专属 selector / 已知 PDF 路径模板:
+     · 出版商(按落地页所属域名启用):Elsevier(sciencedirect,/pdfft、/pii/…pdf)、
+       Springer(/content/pdf/…pdf)、Wiley(/doi/pdf/、/doi/pdfdirect/)、
+       ACS(/doi/pdf/)、RSC(articlepdf)、IEEE(getPDF/stampPDF、/ielx…pdf)、MDPI(…/pdf)。
+     · 机构库/仓储(按 URL 形态识别,与域名无关——机构库遍布各高校):这些"取文件"
+       端点语义明确是下载全文却常不带 .pdf 后缀,通用规则会漏:Figshare(ndownloader
+       …/files/<id>)、OSTI(/servlets/purl/<id>)、DSpace 7(/bitstreams/<uuid>/download|
+       content;DSpace 6 的 /bitstream/…/<name>.pdf 已由通用 .pdf 命中)、Invenio/Zenodo
+       (/records/<id>/files/<name>/content)、Digital Commons/bepress(viewcontent.cgi)。
   6) <a>/<embed>/<iframe> 的 href/src 中以 .pdf 结尾 或 路径含 /pdf 的通用链接。
   7) 纯解析式重定向目标:<meta http-equiv="refresh" content="0;url=…">、
      <link rel="canonical">、内联脚本里的 location.href/replace/assign 跳转——
@@ -139,6 +144,46 @@ def _is_publisher_pdf(publisher: str, url: str) -> bool:
     return False
 
 
+def _is_repository_pdf(url: str) -> bool:
+    """识别常见机构库/仓储的 PDF "取文件"端点(即使 URL 不以 .pdf 结尾)。
+
+    机构库遍布各大高校、域名各异,不能像出版商那样按域名开关;这里纯按 URL 形态识别。
+    只覆盖那些"下载全文文件"语义明确、但通用 _is_pdf_url 会漏(路径不含 .pdf / /pdf)
+    的端点形态——实测(batch6)确认这些形态直连即为 PDF、且常见于落地页链接:
+      · Figshare:              ndownloader.figshare.com/files/<id> / …/ndownloader/files/<id>
+      · OSTI:                  /servlets/purl/<id>(biblio 条目页里指向它的全文链接)
+      · DSpace 7:              /bitstreams/<uuid>/download、/bitstreams/<uuid>/content
+                               (DSpace 6 的 /bitstream/…/<name>.pdf 已被通用 .pdf 规则命中)
+      · Invenio / Zenodo:      /records/<id>/files/<name>/content
+      · Digital Commons/bepress:/cgi/viewcontent.cgi?article=…&context=…
+
+    刻意从严:只认上述"下载文件"形态,缩略图(.jpg)、条目/HTML 页、登录页都不命中,
+    以免误报;即便偶有误报,download.py 仍会用 %PDF 魔数二次校验兜底。
+    """
+    if not isinstance(url, str):
+        return False
+    low = url.strip().lower()
+    if not low:
+        return False
+    path = low.split("#", 1)[0].split("?", 1)[0]
+    # Figshare 下载端点(专用下载域名,或站内 /ndownloader/files/ 路径)
+    if "ndownloader.figshare.com/files/" in low or "/ndownloader/files/" in low:
+        return True
+    # OSTI PURL servlet —— 全文 PDF 的稳定入口
+    if "/servlets/purl/" in path:
+        return True
+    # DSpace 7 bitstream 下载/内容端点(UUID 形态,不带扩展名)
+    if "/bitstreams/" in path and (path.endswith("/download") or path.endswith("/content")):
+        return True
+    # Invenio / Zenodo(InvenioRDM)record 文件内容端点
+    if "/files/" in path and path.endswith("/content"):
+        return True
+    # Digital Commons(bepress)全文处理器
+    if "viewcontent.cgi" in path:
+        return True
+    return False
+
+
 def _parse_meta_refresh(content: str) -> Optional[str]:
     """从 <meta http-equiv=refresh content="N; url=..."> 中抠出跳转目标 URL。"""
     if not content:
@@ -192,7 +237,8 @@ class _LinkCollector(HTMLParser):
         self.jsonld_urls: List[str] = []     # 2) JSON-LD
         self.link_rel_urls: List[str] = []   # 3) <link type=application/pdf>
         self.data_urls: List[str] = []       # 4) data-* 属性
-        self.publisher_urls: List[str] = []  # 5) 出版商专属
+        self.publisher_urls: List[str] = []  # 5a) 出版商专属
+        self.repo_urls: List[str] = []       # 5b) 机构库/仓储专属(无 .pdf 后缀的下载端点)
         self.link_urls: List[str] = []       # 6) 通用 a/embed/iframe
         self.redirect_urls: List[str] = []   # 7) 重定向目标(meta refresh/canonical/JS)
         self.weak_meta_urls: List[str] = []  # 8) 弱 meta(DC.*,最低)
@@ -202,9 +248,11 @@ class _LinkCollector(HTMLParser):
         self._script_buf: List[str] = []
         self._script_len = 0
 
-    def _pub_or_pdf(self, u: str) -> bool:
-        """通用 .pdf/含 /pdf,或本页出版商的专属 PDF 模板——都算 PDF 候选。"""
-        return _is_pdf_url(u) or _is_publisher_pdf(self._pub, u)
+    def _is_candidate(self, u: str) -> bool:
+        """通用 .pdf/含 /pdf、本页出版商专属模板、或机构库下载端点——都算 PDF 候选。"""
+        return (_is_pdf_url(u)
+                or _is_publisher_pdf(self._pub, u)
+                or _is_repository_pdf(u))
 
     def _collect_data_attrs(self, attr: dict) -> None:
         """扫描任意标签的 data-* 属性,取值像 PDF 就纳入 data 桶(懒加载/自定义下载按钮常见)。"""
@@ -214,7 +262,7 @@ class _LinkCollector(HTMLParser):
             val = v.strip()
             if not val or _should_skip(val):
                 continue
-            if self._pub_or_pdf(val):
+            if self._is_candidate(val):
                 self.data_urls.append(val)
 
     def handle_starttag(self, tag, attrs):  # noqa: ANN001 - HTMLParser 回调签名固定
@@ -231,7 +279,7 @@ class _LinkCollector(HTMLParser):
             # ⑦ meta refresh 跳转:content="N; url=..."
             if (attr.get("http-equiv") or "").strip().lower() == "refresh":
                 target = _parse_meta_refresh(attr.get("content") or "")
-                if target and not _should_skip(target) and self._pub_or_pdf(target):
+                if target and not _should_skip(target) and self._is_candidate(target):
                     self.redirect_urls.append(target)
                 return
             key = (attr.get("name") or attr.get("property") or "").strip().lower()
@@ -260,7 +308,7 @@ class _LinkCollector(HTMLParser):
             if not href or _should_skip(href):
                 return
             typ = (attr.get("type") or "").strip().lower()
-            if typ == _PDF_MIME or _is_pdf_url(href):
+            if typ == _PDF_MIME or _is_pdf_url(href) or _is_repository_pdf(href):
                 self.link_rel_urls.append(href)
                 return
             # ⑦ canonical 指向 PDF(仅出版商模板能识别的形态才补,通用 pdf 已在上面命中)
@@ -275,6 +323,8 @@ class _LinkCollector(HTMLParser):
                 return
             if _is_publisher_pdf(self._pub, u):
                 self.publisher_urls.append(u)
+            elif _is_repository_pdf(u):
+                self.repo_urls.append(u)
             elif _is_pdf_url(u):
                 self.link_urls.append(u)
 
@@ -311,7 +361,7 @@ class _LinkCollector(HTMLParser):
             # ⑦ 内联脚本里的显式 location 跳转,目标像 PDF 才纳入
             for m in _JUMP_RE.finditer(raw):
                 target = (m.group(1) or "").strip()
-                if target and not _should_skip(target) and self._pub_or_pdf(target):
+                if target and not _should_skip(target) and self._is_candidate(target):
                     self.redirect_urls.append(target)
 
 
@@ -329,13 +379,14 @@ def extract_pdf_links(html: str, base_url: str) -> list[str]:
         pass
 
     absolute: List[str] = []
-    # 置信度桶顺序:强 meta > JSON-LD > link[type=pdf] > data-* > 出版商 >
+    # 置信度桶顺序:强 meta > JSON-LD > link[type=pdf] > data-* > 出版商 > 机构库 >
     #               通用 a/embed/iframe > 重定向目标 > 弱 meta(DC.*)
     for u in (collector.meta_urls
               + collector.jsonld_urls
               + collector.link_rel_urls
               + collector.data_urls
               + collector.publisher_urls
+              + collector.repo_urls
               + collector.link_urls
               + collector.redirect_urls
               + collector.weak_meta_urls):
@@ -562,5 +613,81 @@ if __name__ == "__main__":
     h26 = '<a href="/en/content/articlepdf/1/a/b">x</a>'
     assert extract_pdf_links(h26, "https://random.org/p") == [], \
         extract_pdf_links(h26, "https://random.org/p")
+
+    # ===== 以下为本次新增:机构库/仓储下载端点(无 .pdf 后缀,通用规则会漏)=====
+    # 样例形态取自 out/batch6 实测(osti.gov/servlets/purl、DSpace7 /bitstreams/…/download 等)
+
+    # ㉗ OSTI:biblio 条目页里指向 /servlets/purl/<id> 的全文链接(不带 .pdf)
+    osti_href = "/servlets/purl/2000177"
+    assert not _is_pdf_url(osti_href), "OSTI purl 不应被通用 .pdf 规则命中"
+    assert _is_repository_pdf(osti_href), osti_href
+    h27 = f'<a href="{osti_href}">Full Text PDF</a>'
+    assert extract_pdf_links(h27, "https://www.osti.gov/biblio/2000177") == [
+        "https://www.osti.gov/servlets/purl/2000177"
+    ], extract_pdf_links(h27, "https://www.osti.gov/biblio/2000177")
+
+    # ㉘ Figshare:ndownloader 专用下载域名(路径无 .pdf)
+    fs = "https://ndownloader.figshare.com/files/30093867"
+    assert not _is_pdf_url(fs) and _is_repository_pdf(fs), fs
+    h28 = f'<a href="{fs}">Download</a>'
+    assert extract_pdf_links(
+        h28, "https://figshare.com/articles/dataset/x/30093867"
+    ) == [fs], extract_pdf_links(h28, "https://figshare.com/articles/dataset/x/30093867")
+
+    # ㉙ DSpace 7:/bitstreams/<uuid>/download 与 /content(UUID 形态,无扩展名)
+    dl = "/bitstreams/26413f52-5f62-4ab4-b3f6-283424ddeaa0/download"
+    ct = "/bitstreams/8c924f94-94a4-4438-bc53-4e70e398c7ea/content"
+    assert not _is_pdf_url(dl) and _is_repository_pdf(dl), dl
+    assert not _is_pdf_url(ct) and _is_repository_pdf(ct), ct
+    h29 = f'<a href="{dl}">PDF</a><a href="{ct}">PDF2</a>'
+    assert extract_pdf_links(h29, "https://riunet.upv.es/handle/10251/1") == [
+        "https://riunet.upv.es" + dl,
+        "https://riunet.upv.es" + ct,
+    ], extract_pdf_links(h29, "https://riunet.upv.es/handle/10251/1")
+
+    # ㉚ Invenio/Zenodo(InvenioRDM):/records/<id>/files/<name>/content(以 /content 收尾)
+    zc = "/records/8154177/files/article.pdf/content"
+    assert not _is_pdf_url(zc), "Invenio /content 端点不应被通用规则命中"
+    assert _is_repository_pdf(zc), zc
+    h30 = f'<a href="{zc}">Download</a>'
+    assert extract_pdf_links(h30, "https://zenodo.org/records/8154177") == [
+        "https://zenodo.org/records/8154177/files/article.pdf/content"
+    ], extract_pdf_links(h30, "https://zenodo.org/records/8154177")
+
+    # ㉛ Digital Commons(bepress):/cgi/viewcontent.cgi 全文处理器(无 .pdf 后缀)
+    vc = "/cgi/viewcontent.cgi?article=1234&context=facultybib2010"
+    assert not _is_pdf_url(vc) and _is_repository_pdf(vc), vc
+    h31 = f'<a href="{vc}">Download</a>'
+    assert extract_pdf_links(h31, "https://stars.library.ucf.edu/facultybib2010/72") == [
+        "https://stars.library.ucf.edu/cgi/viewcontent.cgi?article=1234&context=facultybib2010"
+    ], extract_pdf_links(h31, "https://stars.library.ucf.edu/facultybib2010/72")
+
+    # ㉜ 反例(不误报):缩略图 / 条目页 / 登录页 / 非 /content 文件端点都不算候选
+    assert not _is_repository_pdf("/bitstreams/uuid/thumbnail")  # 非 download/content
+    assert not _is_repository_pdf("/handle/10261/123797")        # 条目页,不是取文件端点
+    assert not _is_repository_pdf("/login?next=/records/1")      # 登录页
+    assert not _is_repository_pdf("/records/1/files/fig.png")    # 未以 /content 收尾
+    # DSpace 6 缩略图 .jpg 不应被误纳(单数 /bitstream/,且不含 .pdf / /pdf)
+    h32 = '<a href="/bitstream/handle/1/2/paper.pdf.jpg?sequence=4">thumb</a>'
+    assert extract_pdf_links(h32, "https://repo.edu/x") == [], \
+        extract_pdf_links(h32, "https://repo.edu/x")
+
+    # ㉝ 回归:DSpace 6 的 /bitstream/…/<name>.pdf 仍由通用 .pdf 规则回收(新桶不干扰)
+    d6 = "/bitstream/10261/123797/1/paper.pdf"
+    assert extract_pdf_links(f'<a href="{d6}">PDF</a>', "https://digital.csic.es/x") == [
+        "https://digital.csic.es" + d6
+    ]
+
+    # ㉞ 排序:出版商 > 机构库 > 通用(三桶同页时按此优先级去重保序)
+    h34 = (
+        '<a href="/gen.pdf">g</a>'                        # 通用
+        '<a href="/servlets/purl/999">osti</a>'           # 机构库(OSTI)
+        '<a href="/en/content/articlepdf/1/a/b">rsc</a>'  # 出版商(RSC)
+    )
+    assert extract_pdf_links(h34, "https://pubs.rsc.org/x") == [
+        "https://pubs.rsc.org/en/content/articlepdf/1/a/b",  # 出版商
+        "https://pubs.rsc.org/servlets/purl/999",            # 机构库
+        "https://pubs.rsc.org/gen.pdf",                      # 通用
+    ], extract_pdf_links(h34, "https://pubs.rsc.org/x")
 
     print("SELFTEST_OK")

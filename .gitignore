@@ -8,6 +8,14 @@ demo_out/
 *_out2/
 test_scholar_out*/
 status_probe_out/
+pdfs_dl/
+pdfs_hitrate/
+*_chunks/
+
+# ===== 巡检/调试临时物 & 本地运行状态（保留磁盘，不入库）=====
+_audit_filelist.txt
+file_listing.txt
+.secretary_state.json
 
 # ===== Python 缓存 / 构建 =====
 __pycache__/
