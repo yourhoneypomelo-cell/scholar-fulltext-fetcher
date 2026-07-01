@@ -1,0 +1,3 @@
+# fulltext_fetcher 运行依赖
+# 仅依赖 requests;其余均为 Python 3.8+ 标准库(argparse/concurrent.futures/json/logging 等)。
+requests>=2.28

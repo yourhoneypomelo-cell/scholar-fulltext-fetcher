@@ -1,0 +1,222 @@
+#!/usr/bin/env python3
+"""一键回归 runner:对 fulltext_fetcher 全包 compileall + 逐个跑各模块内置 selftest,汇总 PASS/FAIL/SKIP。
+
+用法:
+    python run_all_selftests.py
+
+设计:
+- 纯标准库;仅以「子进程」方式运行各模块的内置 selftest,绝不修改被测模块。
+- 模块文件尚未创建(队友在写)→ 记 SKIP,不计为失败。
+- 模块已存在但 selftest 未通过(子进程退出码≠0 或 stdout 缺少约定的 *_OK 标志)→ 记 FAIL。
+- 总退出码:仅当「已存在模块」出现真实失败(含 compileall 失败)才为 1,否则 0(SKIP 不影响)。
+- 结尾打印汇总表,并输出机器可读的 ALL_SELFTESTS_DONE。
+
+注:各模块 selftest 约定为「不联网、打印一行 <MOD>_OK 表示通过」;cli 需 --selftest 触发。
+状态标记(PASS/FAIL/SKIP)与关键 token 全用 ASCII,兼容任意终端编码。
+"""
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import time
+
+# 尽力把本脚本自身输出切到 UTF-8(失败也无妨:关键 token 均为 ASCII)。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+ROOT = os.path.dirname(os.path.abspath(__file__))
+PKG = "fulltext_fetcher"
+PER_CHECK_TIMEOUT = 180  # 单个 selftest 子进程超时(秒),防止误联网/死循环拖垮整体
+
+PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
+
+# (显示名, 候选模块[按序取首个存在者], 传给模块的参数, 期望的 OK 标志)
+# 候选给多个位置,是为了容忍队友把新模块放到 顶层 或 sources/ 任一处。
+CHECKS = [
+    ("landing",            ["fulltext_fetcher.landing"],                                                 [],             "SELFTEST_OK"),
+    ("cli",                ["fulltext_fetcher.cli"],                                                     ["--selftest"], "CLI_OK"),
+    ("resolve",            ["fulltext_fetcher.resolve"],                                                 [],             "RESOLVE_OK"),
+    ("aggregators",        ["fulltext_fetcher.sources.aggregators"],                                     [],             "AGGREGATORS_OK"),
+    ("report",             ["fulltext_fetcher.report"],                                                  [],             "REPORT_OK"),
+    ("download",           ["fulltext_fetcher.download"],                                                [],             "DOWNLOAD_OK"),
+    ("publisher_adapter",  ["fulltext_fetcher.publisher_adapter"],                                       [],             "PUBLISHER_ADAPTER_OK"),
+    ("green_oa",           ["fulltext_fetcher.sources.green_oa", "fulltext_fetcher.green_oa"],           [],             "GREEN_OA_OK"),
+    ("zotero",             ["fulltext_fetcher.zotero", "fulltext_fetcher.sources.zotero"],               [],             "ZOTERO_OK"),
+    ("snapshot_bootstrap", ["fulltext_fetcher.snapshot_bootstrap"],                                      [],             "SNAPSHOT_BOOTSTRAP_OK"),
+    ("citations",          ["fulltext_fetcher.citations", "fulltext_fetcher.sources.citations"],         ["selftest"],   "CITATIONS_OK"),
+    ("scholar_serpapi",    ["fulltext_fetcher.scholar_serpapi", "fulltext_fetcher.sources.scholar_serpapi"], [],         "SCHOLAR_SERPAPI_OK"),
+    # 端到端 selftest(仅子进程运行,绝不编辑该文件)。纳入它以避免 CI 对 e2e 回归「假绿」。
+    ("selftest_e2e",       ["fulltext_fetcher.selftest_e2e"],                                            [],             "E2E_OK"),
+
+    # —— Scholar 爬虫子系统 fulltext_fetcher/scholar/(P0-P4 各模块内置 selftest,均不联网)——
+    ("scholar.models",     ["fulltext_fetcher.scholar.models"],       [], "MODELS_OK"),
+    ("scholar.config",     ["fulltext_fetcher.scholar.config"],       [], "CONFIG_OK"),
+    ("scholar.logsetup",   ["fulltext_fetcher.scholar.logsetup"],     [], "LOGSETUP_OK"),
+    ("scholar.query",      ["fulltext_fetcher.scholar.query"],        [], "QUERY_OK"),
+    ("scholar.serp",       ["fulltext_fetcher.scholar.serp"],         [], "SERP_OK"),
+    ("scholar.proxy",      ["fulltext_fetcher.scholar.proxy"],        [], "PROXY_OK"),
+    ("scholar.captcha",    ["fulltext_fetcher.scholar.captcha"],      [], "CAPTCHA_OK"),
+    ("scholar.fetcher",    ["fulltext_fetcher.scholar.fetcher"],      [], "FETCHER_OK"),
+    ("scholar.download",   ["fulltext_fetcher.scholar.download"],     [], "SCH_DOWNLOAD_OK"),
+    ("scholar.naming",     ["fulltext_fetcher.scholar.naming"],       [], "NAMING_OK"),
+    ("scholar.e2e",        ["fulltext_fetcher.scholar.selftest_e2e"], [], "SCHOLAR_E2E_OK"),
+
+    # —— 其它增强模块 ——
+    ("aio",                ["fulltext_fetcher.aio"],                  [], "AIO_OK"),
+]
+
+
+def _module_file(dotted: str) -> str:
+    """点分模块名 → 相对 ROOT 的 .py 文件路径。"""
+    return os.path.join(ROOT, *dotted.split(".")) + ".py"
+
+
+def _resolve_module(candidates):
+    """返回首个「文件存在」的候选模块名;都不存在返回 None(→ SKIP)。"""
+    for mod in candidates:
+        if os.path.isfile(_module_file(mod)):
+            return mod
+    return None
+
+
+def _child_env():
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"  # 让子进程稳定以 UTF-8 输出,便于抓 *_OK 标志
+    env["PYTHONUTF8"] = "1"
+    return env
+
+
+def _run(cmd):
+    """跑子进程 → (rc, out, err);超时/异常也归一化为 (rc, out, err),绝不抛出。"""
+    try:
+        proc = subprocess.run(
+            cmd, cwd=ROOT, env=_child_env(),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=PER_CHECK_TIMEOUT,
+        )
+        return (proc.returncode,
+                proc.stdout.decode("utf-8", "replace"),
+                proc.stderr.decode("utf-8", "replace"))
+    except subprocess.TimeoutExpired as exc:
+        partial = exc.stdout
+        out = partial.decode("utf-8", "replace") if isinstance(partial, (bytes, bytearray)) else (partial or "")
+        return 124, out, "TIMEOUT after %ss" % PER_CHECK_TIMEOUT
+    except Exception as exc:  # noqa: BLE001 - runner 不得因单次执行异常中断整体
+        return 125, "", "runner-exec-error: %r" % (exc,)
+
+
+def _looks_like_bad_invocation(rc, text):
+    """失败是否更像「调用方式不对」(argparse 用法错)而非真实 selftest 失败?
+
+    用于决定是否值得改用其它触发方式重试:argparse 用法错通常 rc==2 且打印 usage;
+    而真实断言失败/超时不应重试(重试只会重复失败、白白拖慢)。
+    """
+    if rc == 2:  # argparse 惯用的「用法错误」退出码
+        return True
+    low = (text or "").lower()
+    return any(k in low for k in (
+        "usage:", "unrecognized arguments", "invalid choice",
+        "the following arguments are required",
+    ))
+
+
+def _run_selftest(mod, primary_args, flag):
+    """跑模块 selftest → (rc, out, err, used_args, ok)。
+
+    各模块 selftest 触发约定并不统一(裸调用 / `--selftest` / `selftest` 位置参数)。
+    先用声明的 primary_args;仅当首次失败「看起来是调用方式不对」(argparse 用法错)时,
+    才回退尝试其它常见触发方式(selftest / --selftest / 裸调用,去重)。真实断言失败/超时
+    不重试,避免拖慢。任一次 rc==0 且含 *_OK 即判通过。
+    """
+    used = list(primary_args)
+    rc, out, err = _run([sys.executable, "-m", mod] + used)
+    if rc == 0 and flag in (out + "\n" + err):
+        return rc, out, err, used, True
+    if _looks_like_bad_invocation(rc, err) or _looks_like_bad_invocation(rc, out):
+        seen = [used]
+        for cand in (["selftest"], ["--selftest"], []):
+            if cand in seen:
+                continue
+            seen.append(cand)
+            rc2, out2, err2 = _run([sys.executable, "-m", mod] + cand)
+            if rc2 == 0 and flag in (out2 + "\n" + err2):
+                return rc2, out2, err2, cand, True
+    return rc, out, err, used, False
+
+
+def _tail(text, limit=240):
+    """把多行输出压成单行短尾,便于并排显示。"""
+    text = (text or "").replace("\r", "").strip()
+    if not text:
+        return ""
+    text = " | ".join(ln for ln in text.splitlines() if ln.strip())
+    return text[-limit:]
+
+
+def _emit(name, status, detail):
+    print("[%-4s] %-20s %s" % (status, name, detail))
+
+
+def main() -> int:
+    print("=" * 64)
+    print("run_all_selftests :: package=%s" % PKG)
+    print("python : %s" % sys.version.split()[0])
+    print("root   : %s" % ROOT)
+    print("=" * 64)
+
+    results = []  # list[(name, status, detail)]
+
+    # 0) 全包字节码编译(语法级健康检查;失败视为真实失败)
+    t0 = time.time()
+    rc, out, err = _run([sys.executable, "-m", "compileall", "-q", PKG])
+    dt = time.time() - t0
+    if rc == 0:
+        results.append(("compileall", PASS, "exit=0 (%.1fs)" % dt))
+    else:
+        results.append(("compileall", FAIL, "exit=%d :: %s" % (rc, _tail(err or out))))
+    _emit(*results[-1])
+
+    # 1) 逐模块 selftest
+    for name, candidates, args, flag in CHECKS:
+        mod = _resolve_module(candidates)
+        if mod is None:
+            results.append((name, SKIP, "module not created yet (WIP): %s" % "|".join(candidates)))
+            _emit(*results[-1])
+            continue
+        t0 = time.time()
+        rc, out, err, used, ok = _run_selftest(mod, args, flag)
+        dt = time.time() - t0
+        shown = mod + ((" " + " ".join(used)) if used else "")
+        if ok:
+            results.append((name, PASS, "%s via `%s` (%.1fs)" % (flag, shown, dt)))
+        else:
+            why = []
+            if rc != 0:
+                why.append("exit=%d" % rc)
+            if flag not in (out + "\n" + err):
+                why.append("missing %s" % flag)
+            results.append((name, FAIL, "%s :: %s" % ("; ".join(why) or "unknown", _tail(err or out))))
+        _emit(*results[-1])
+
+    # 2) 汇总
+    n_pass = sum(1 for _, s, _ in results if s == PASS)
+    n_fail = sum(1 for _, s, _ in results if s == FAIL)
+    n_skip = sum(1 for _, s, _ in results if s == SKIP)
+    print("=" * 64)
+    print("SUMMARY: PASS=%d  FAIL=%d  SKIP=%d  (total=%d)" % (n_pass, n_fail, n_skip, len(results)))
+    if n_fail:
+        print("FAILED       : %s" % ", ".join(n for n, s, _ in results if s == FAIL))
+    if n_skip:
+        print("SKIPPED (WIP): %s" % ", ".join(n for n, s, _ in results if s == SKIP))
+    print("=" * 64)
+    print("ALL_SELFTESTS_DONE")
+    # 仅「已存在模块的真实失败(含 compileall)」→ 非 0;SKIP 不影响。
+    return 1 if n_fail else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

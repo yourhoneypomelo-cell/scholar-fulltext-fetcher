@@ -1,0 +1,39 @@
+# fulltext_fetcher 打包描述(PEP 621)。纯新增,不改动任何既有代码。
+# 依赖参考:fulltext_fetcher/requirements.txt(运行期仅 requests)。
+# 版本对齐 fulltext_fetcher/__init__.py 的 __version__(如升版本请两处同步)。
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fulltext_fetcher"
+version = "1.0.0"
+description = "输入 DOI/标题,多源回退全自动定位并下载全网可及的免费开放获取(OA)全文/PDF。"
+readme = "README.md"
+requires-python = ">=3.8"
+authors = [{ name = "谷歌学术人机认证工作组" }]
+keywords = ["open-access", "fulltext", "pdf", "doi", "unpaywall", "openalex", "scholarly"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering",
+]
+dependencies = [
+    "requests>=2.28",
+]
+
+[project.optional-dependencies]
+# 读取 .xlsx/.xlsm 输入表(cli._read_xlsx;缺省下 .csv/.txt 走标准库,无需该依赖)
+xlsx = ["openpyxl"]
+# 渲染型落地页取 PDF 的可选增强(无则回退纯 HTTP 抓取)
+render = ["playwright"]
+
+[project.scripts]
+# setuptools 生成的入口会执行 sys.exit(main());cli.main 返回 int 即作退出码,无需改 cli.py。
+fulltext-fetcher = "fulltext_fetcher.cli:main"
+
+[tool.setuptools.packages.find]
+# 仅打包本包及其子包(fulltext_fetcher 与 fulltext_fetcher.sources),排除 poc/ 等仓内其它目录。
+include = ["fulltext_fetcher*"]

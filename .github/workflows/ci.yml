@@ -1,0 +1,68 @@
+name: CI
+
+# push / PR 自动跑回归:编译全部模块(compileall)+ 逐个跑"不联网"selftest。
+# 推到 GitHub 后即生效;若本仓暂未托管到 GitHub,本文件为"就绪即用"资产、无副作用。
+on: [push, pull_request, workflow_dispatch]
+
+permissions:
+  contents: read
+
+# 同一分支的新提交自动取消仍在跑的旧任务,省额度。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  selftests:
+    name: compileall + selftests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false        # 某个 Python 版本挂了,其余版本仍继续跑
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # 只装强制依赖 requests(见 fulltext_fetcher/requirements.txt);
+      # openpyxl 为可选依赖,故意不安装 —— 用以验证"零可选依赖"路径:
+      # cli 的 .xlsx 读取有 try/except 兜底,selftest 只走 CSV/TXT,不需 openpyxl。
+      - name: Install dependencies (requests only; openpyxl left out on purpose)
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f fulltext_fetcher/requirements.txt ]; then
+            pip install -r fulltext_fetcher/requirements.txt
+          else
+            pip install "requests>=2.28"
+          fi
+
+      # 语法/导入基线:全部模块可编译。
+      - name: Compile all modules
+        run: python -m compileall -q fulltext_fetcher
+
+      # 优先用队友的一键回归脚本 run_all_selftests.py(若已就绪);
+      # 未就绪时回退到逐模块显式调用(与 D1 验收清单一致)。
+      - name: Run selftests (offline)
+        run: |
+          if [ -f run_all_selftests.py ]; then
+            echo "==> run_all_selftests.py 就绪:一键跑全量 selftest + compileall"
+            python run_all_selftests.py
+          else
+            echo "==> run_all_selftests.py 未就绪:逐模块回退跑各 selftest"
+            python -m fulltext_fetcher.landing
+            python -m fulltext_fetcher.resolve
+            python -m fulltext_fetcher.sources.aggregators
+            python -m fulltext_fetcher.report
+            python -m fulltext_fetcher.download
+            python -m fulltext_fetcher.cli --selftest
+            python -m fulltext_fetcher.sources.green_oa
+            python -m fulltext_fetcher.snapshot_bootstrap selftest
+            python -m fulltext_fetcher.zotero
+            python -m fulltext_fetcher.selftest_e2e
+          fi

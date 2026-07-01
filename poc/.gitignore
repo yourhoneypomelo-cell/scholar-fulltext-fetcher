@@ -1,0 +1,4 @@
+out/
+smoke_out/
+__pycache__/
+*.pyc

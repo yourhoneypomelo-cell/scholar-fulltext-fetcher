@@ -1,0 +1,10 @@
+# 自建栈 PoC（角度1+3+6）依赖
+# —— 必需：真正联网（--execute）时才需要；dry-run 不需要任何第三方包 ——
+scholarly>=1.7          # 角度1：Google Scholar 元数据载体（内置 ProxyGenerator 供角度6 代理位）
+
+# —— 可选：角度3 指纹对抗引擎，默认关闭，按需手动安装（取消注释）——
+# curl_cffi>=0.7        # 角度3·L1：TLS/HTTP2 指纹模拟（impersonate 真实 Chrome）
+# nodriver>=0.35        # 角度3·L3：直连 CDP、规避自动化协议指纹（benchmark 最佳）
+
+# 说明：角度6 的「代理」是外部资源（住宅/移动代理供应商或自建代理池），不是 pip 包，
+#       通过 --proxy 或环境变量 PROXY 传入，见 README 与《检索成果-角度6-代理基础设施》。

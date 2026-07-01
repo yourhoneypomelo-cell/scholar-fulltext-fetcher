@@ -1,0 +1,40 @@
+# ===== 运行产物 / 输出目录（可复现、不入库；文件仍留在磁盘）=====
+out/
+out_scholar/
+smoke*/
+test_out/
+demo_out/
+*_out/
+*_out2/
+test_scholar_out*/
+status_probe_out/
+
+# ===== Python 缓存 / 构建 =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ===== 虚拟环境 =====
+.venv/
+venv/
+env/
+.env
+
+# ===== 密钥 / 本地凭据（严禁入库）=====
+*.key
+serpapi*.txt
+proxies*.txt
+credentials.json
+
+# ===== 编辑器 / 系统 =====
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
