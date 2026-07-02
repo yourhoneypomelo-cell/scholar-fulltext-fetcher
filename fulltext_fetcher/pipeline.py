@@ -340,10 +340,36 @@ class Pipeline:
             self._results.append(result)
         return result
 
+    def _browser_fallback_active(self) -> bool:
+        """是否启用了任一"重、慢但合法"的浏览器/CF 兜底路径。
+
+        这些路径(FlareSolverr 解 CF、render 渲染、有头浏览器下载、browser_search 源)单条合法耗时
+        可达数分钟,须据此放大 straggler"无进展"阈值,避免误杀慢但合法的 CF 尾部条目。
+        FlareSolverr 检测口径与 download._flaresolverr_enabled 保持一致(cfg 开关 / 端点 / 环境变量)。"""
+        cfg = self.cfg
+        if getattr(cfg, "use_flaresolverr", False) or getattr(cfg, "flaresolverr_url", None):
+            return True
+        if os.environ.get("FLARESOLVERR_URL"):
+            return True
+        if getattr(cfg, "render_fallback", False) or getattr(cfg, "browser_pdf_download", False):
+            return True
+        try:
+            if any(getattr(s, "name", "") == "browser_search" for s in self.sources):
+                return True
+        except Exception:  # noqa: BLE001 - 源列表异常不致命,退化为"未启用"
+            pass
+        return False
+
     def _straggler_timeout(self) -> float:
         """尾部卡死看门狗的无进展阈值秒:一段时间内无任何输入完成即判定尾部卡死。
         优先取 cfg.item_timeout(若配置且 >0),否则按 per-request 超时保守放大——
-        既容忍最慢的合法单条(多源回退 + 重试),又能兜住真正的无限卡死。"""
+        既容忍最慢的合法单条(多源回退 + 重试),又能兜住真正的无限卡死。
+
+        **CF/浏览器兜底启用时**(FlareSolverr / render_fallback / browser_pdf_download / browser_search 源):
+        单条合法耗时会因浏览器解 CF(flaresolverr_timeout_ms)、有头渲染等待、多候选逐个下载/重试
+        而涨到数分钟。此时把"无进展"阈值显著放大(≥900s),避免把"慢但合法"的 CF 尾部条目误杀成
+        straggler-timeout 假失败(会压低回收率);真卡死仍会在放大后的窗口兜住并照常收尾落盘。
+        默认(无浏览器/CF 兜底)行为保持不变(max(180, timeout*8))。"""
         cfg_val = getattr(self.cfg, "item_timeout", 0) or 0
         try:
             cfg_val = float(cfg_val)
@@ -352,6 +378,11 @@ class Pipeline:
         if cfg_val > 0:
             return cfg_val
         base = float(getattr(self.cfg, "timeout", 30.0) or 30.0)
+        if self._browser_fallback_active():
+            fs_s = float(getattr(self.cfg, "flaresolverr_timeout_ms", 60000) or 60000) / 1000.0
+            browser_wait = float(getattr(self.cfg, "browser_pdf_wait", 13.0) or 0.0)
+            # 单条 CF 合法耗时 ≈ 数×(FS 解题 + 渲染等待 + 下载);取宽裕的"零进展=真卡死"窗口。
+            return max(900.0, base * 30.0, (fs_s + browser_wait) * 6.0)
         return max(180.0, base * 8.0)
 
     def _record_straggler(self, raw: str) -> None:
@@ -469,6 +500,27 @@ if __name__ == "__main__":  # 离线 selftest(不联网): python -m fulltext_fet
         _pipe = Pipeline(_cfg)
 
         assert abs(_pipe._straggler_timeout() - 1.0) < 1e-9, _pipe._straggler_timeout()
+
+        # 回归:straggler 无进展阈值的 CF/浏览器感知分支(修「CF 重活下误杀合法尾部」)。
+        # 复用 _pipe,临时改 cfg/sources 断言两分支后还原(还原到 item_timeout=1.0,不影响后续 run())。
+        _saved_st = (_cfg.item_timeout, _cfg.use_flaresolverr, _cfg.timeout)
+        _cfg.item_timeout = 0            # 关顶层 override,走保守放大逻辑
+        _cfg.timeout = 30.0
+        assert _pipe._browser_fallback_active() is False, "默认应视为未启用浏览器/CF 兜底"
+        assert abs(_pipe._straggler_timeout() - 240.0) < 1e-9, _pipe._straggler_timeout()  # max(180, 30*8)
+        _cfg.use_flaresolverr = True     # 启用 FlareSolverr → CF 感知放大 ≥900s
+        assert _pipe._browser_fallback_active() is True
+        assert _pipe._straggler_timeout() >= 900.0, _pipe._straggler_timeout()
+        _cfg.use_flaresolverr = False
+
+        class _FakeBrowserSrc:           # 经 browser_search 源也应触发放大
+            name = "browser_search"
+        _pipe.sources.append(_FakeBrowserSrc())
+        assert _pipe._browser_fallback_active() is True
+        assert _pipe._straggler_timeout() >= 900.0, _pipe._straggler_timeout()
+        _pipe.sources.pop()
+        (_cfg.item_timeout, _cfg.use_flaresolverr, _cfg.timeout) = _saved_st  # 还原
+        assert abs(_pipe._straggler_timeout() - 1.0) < 1e-9, "还原后应回到 item_timeout=1.0"
 
         # 并发写保护:_pipe 已持有 out_dir 锁,另开 fd 对同一 .lock 应拿不到锁(第二个并发跑批据此快速失败)
         _fd_held = os.open(os.path.join(_tmp, ".lock"), os.O_RDWR | getattr(os, "O_BINARY", 0))

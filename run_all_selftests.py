@@ -31,6 +31,13 @@ for _stream in (sys.stdout, sys.stderr):
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PKG = "fulltext_fetcher"
 PER_CHECK_TIMEOUT = 180  # 单个 selftest 子进程超时(秒),防止误联网/死循环拖垮整体
+ONLINE_TIMEOUT = 240     # 联网自检子进程超时(秒):浏览器启动 + 真解一次,需更大余量
+
+# 联网自检开关:默认关(离线 CI 不受影响);置 RUN_ONLINE_SELFTESTS=1 才真跑,否则记 SKIP。
+ONLINE_ENABLED = os.environ.get("RUN_ONLINE_SELFTESTS") == "1"
+
+# 数据回归开关:默认关(依赖 out/ 审计产物与已隔离 PDF,非纯离线);置 RUN_DATA_REGRESS=1 才真跑。
+DATA_REGRESS_ENABLED = os.environ.get("RUN_DATA_REGRESS") == "1"
 
 PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
 
@@ -78,11 +85,29 @@ CHECKS = [
     ("oa_button",          ["fulltext_fetcher.sources.oa_button", "fulltext_fetcher.oa_button"],          [], "OA_BUTTON_OK"),
     ("publisher_oa",       ["fulltext_fetcher.sources.publisher_oa", "fulltext_fetcher.publisher_oa"],    [], "PUBLISHER_OA_OK"),
     ("publisher_direct",   ["fulltext_fetcher.sources.publisher_direct", "fulltext_fetcher.publisher_direct"], [], "PUBLISHER_DIRECT_OK"),
+    ("institutional",      ["fulltext_fetcher.selftest_institutional"],                                   [], "INSTITUTIONAL_OK"),
+    ("ezproxy",            ["fulltext_fetcher.ezproxy"],                                                  [], "EZPROXY_OK"),
     ("wayback",            ["fulltext_fetcher.sources.wayback", "fulltext_fetcher.wayback"],              [], "WAYBACK_OK"),
     ("preprints",          ["fulltext_fetcher.sources.preprints", "fulltext_fetcher.preprints"],          [], "PREPRINTS_OK"),
     ("browser_search",     ["fulltext_fetcher.browser_search"],                                           [], "BROWSER_SEARCH_OK"),
     ("flaresolverr",       ["fulltext_fetcher.flaresolverr"],                                             [], "FLARESOLVERR_OK"),
     ("bench_free_methods", ["fulltext_fetcher.bench_free_methods", "bench_free_methods"],                 [], "BENCH_OK"),
+]
+
+# —— 可选「联网」自检(默认 SKIP;需真实浏览器 + 出网)——
+# 与上面的离线 CHECKS 分开:仅当环境变量 RUN_ONLINE_SELFTESTS=1 时才真跑,否则一律记 SKIP,
+# 绝不影响默认(离线)回归的 PASS/FAIL。用于验证「免 Docker FlareSolverr 变体」端到端可用。
+# (显示名, 候选模块, 传参, 期望 OK 标志)
+ONLINE_CHECKS = [
+    ("flaresolverr_nodriver", ["tools.flaresolverr_nodriver"], ["--selftest"], "FLARESOLVERR_NODRIVER_OK"),
+]
+
+# —— 可选「数据」回归(默认 SKIP;需 out/ 审计产物在盘)——
+# 防内容 QC 门从「并集(union)」退化回「交集」:重放审计 189 条同域错论文 + 34 条 title 假匹配。
+# 依赖 out/qc_merge_union_wrong.csv、各批 metadata.jsonl 与已隔离 PDF,故不进默认离线回归;
+# 置 RUN_DATA_REGRESS=1 才真跑(改 QC 门判定逻辑后务必跑一次)。
+DATA_REGRESS_CHECKS = [
+    ("regress_qc_union_189", ["tools.regress_qc_union_189"], [], "REGRESS_UNION_189_OK"),
 ]
 
 
@@ -106,13 +131,17 @@ def _child_env():
     return env
 
 
-def _run(cmd):
-    """跑子进程 → (rc, out, err);超时/异常也归一化为 (rc, out, err),绝不抛出。"""
+def _run(cmd, timeout=None):
+    """跑子进程 → (rc, out, err);超时/异常也归一化为 (rc, out, err),绝不抛出。
+
+    timeout 缺省用 PER_CHECK_TIMEOUT;联网自检等较慢项可传更大值(见 ONLINE_TIMEOUT)。
+    """
+    to = PER_CHECK_TIMEOUT if timeout is None else timeout
     try:
         proc = subprocess.run(
             cmd, cwd=ROOT, env=_child_env(),
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=PER_CHECK_TIMEOUT,
+            timeout=to,
         )
         return (proc.returncode,
                 proc.stdout.decode("utf-8", "replace"),
@@ -120,7 +149,7 @@ def _run(cmd):
     except subprocess.TimeoutExpired as exc:
         partial = exc.stdout
         out = partial.decode("utf-8", "replace") if isinstance(partial, (bytes, bytearray)) else (partial or "")
-        return 124, out, "TIMEOUT after %ss" % PER_CHECK_TIMEOUT
+        return 124, out, "TIMEOUT after %ss" % to
     except Exception as exc:  # noqa: BLE001 - runner 不得因单次执行异常中断整体
         return 125, "", "runner-exec-error: %r" % (exc,)
 
@@ -140,16 +169,16 @@ def _looks_like_bad_invocation(rc, text):
     ))
 
 
-def _run_selftest(mod, primary_args, flag):
+def _run_selftest(mod, primary_args, flag, timeout=None):
     """跑模块 selftest → (rc, out, err, used_args, ok)。
 
     各模块 selftest 触发约定并不统一(裸调用 / `--selftest` / `selftest` 位置参数)。
     先用声明的 primary_args;仅当首次失败「看起来是调用方式不对」(argparse 用法错)时,
     才回退尝试其它常见触发方式(selftest / --selftest / 裸调用,去重)。真实断言失败/超时
-    不重试,避免拖慢。任一次 rc==0 且含 *_OK 即判通过。
+    不重试,避免拖慢。任一次 rc==0 且含 *_OK 即判通过。timeout 透传给 _run(联网项用更大值)。
     """
     used = list(primary_args)
-    rc, out, err = _run([sys.executable, "-m", mod] + used)
+    rc, out, err = _run([sys.executable, "-m", mod] + used, timeout=timeout)
     if rc == 0 and flag in (out + "\n" + err):
         return rc, out, err, used, True
     if _looks_like_bad_invocation(rc, err) or _looks_like_bad_invocation(rc, out):
@@ -158,7 +187,7 @@ def _run_selftest(mod, primary_args, flag):
             if cand in seen:
                 continue
             seen.append(cand)
-            rc2, out2, err2 = _run([sys.executable, "-m", mod] + cand)
+            rc2, out2, err2 = _run([sys.executable, "-m", mod] + cand, timeout=timeout)
             if rc2 == 0 and flag in (out2 + "\n" + err2):
                 return rc2, out2, err2, cand, True
     return rc, out, err, used, False
@@ -205,6 +234,39 @@ def main() -> int:
             continue
         t0 = time.time()
         rc, out, err, used, ok = _run_selftest(mod, args, flag)
+        dt = time.time() - t0
+        shown = mod + ((" " + " ".join(used)) if used else "")
+        if ok:
+            results.append((name, PASS, "%s via `%s` (%.1fs)" % (flag, shown, dt)))
+        else:
+            why = []
+            if rc != 0:
+                why.append("exit=%d" % rc)
+            if flag not in (out + "\n" + err):
+                why.append("missing %s" % flag)
+            results.append((name, FAIL, "%s :: %s" % ("; ".join(why) or "unknown", _tail(err or out))))
+        _emit(*results[-1])
+
+    # 1b) 可选联网自检(默认 SKIP;RUN_ONLINE_SELFTESTS=1 才真跑)与
+    #     可选数据回归(默认 SKIP;RUN_DATA_REGRESS=1 才真跑,需 out/ 审计产物)
+    optional_checks = (
+        [(n, c, a, f, ONLINE_ENABLED, "online (set RUN_ONLINE_SELFTESTS=1 to run)", ONLINE_TIMEOUT)
+         for n, c, a, f in ONLINE_CHECKS]
+        + [(n, c, a, f, DATA_REGRESS_ENABLED, "data-regress (set RUN_DATA_REGRESS=1 to run)", PER_CHECK_TIMEOUT)
+           for n, c, a, f in DATA_REGRESS_CHECKS]
+    )
+    for name, candidates, args, flag, enabled, skip_note, timeout in optional_checks:
+        mod = _resolve_module(candidates)
+        if mod is None:
+            results.append((name, SKIP, "module not found: %s" % "|".join(candidates)))
+            _emit(*results[-1])
+            continue
+        if not enabled:
+            results.append((name, SKIP, "%s: %s %s" % (skip_note, mod, " ".join(args))))
+            _emit(*results[-1])
+            continue
+        t0 = time.time()
+        rc, out, err, used, ok = _run_selftest(mod, args, flag, timeout=timeout)
         dt = time.time() - t0
         shown = mod + ((" " + " ".join(used)) if used else "")
         if ok:

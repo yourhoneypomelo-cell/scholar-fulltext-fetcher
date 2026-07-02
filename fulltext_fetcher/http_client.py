@@ -3,9 +3,16 @@
 - 重试:对 429/5xx 指数退避,尊重 Retry-After。
 - 限速:每个 host 维护最小请求间隔(线程安全),避免触发风控。
 - 并发安全:多个 work 线程共享同一 client,共用限速状态。
+- 可选 impersonate 取回(默认关):启用后改用 curl_cffi(伪装真实浏览器 TLS/JA3/HTTP2 指纹)
+  发起 GET,专治「定位到 OA 副本却因指纹被判机器人而 403/挂断」;复用本类既有的重试/退避/
+  限速/熔断逻辑,curl_cffi 的网络异常统一归一到 requests 异常族。开关经 cfg.impersonate_http
+  (软读,默认无该字段=关)或环境变量 FTF_IMPERSONATE_HTTP=1 打开;**默认关 + 缺 curl_cffi 时
+  优雅降级到普通 requests**,行为与未启用时逐字节一致(可一键回退)。curl_cffi 为可选依赖、
+  函数内延迟导入,绝不进父包强制依赖(与 scholar.fetcher / download 的 curl_cffi 用法同栈同哲学)。
 """
 from __future__ import annotations
 
+import os
 import ssl
 import threading
 import time
@@ -32,6 +39,28 @@ def _is_ssl_error(exc: BaseException) -> bool:
         return True
     s = f"{type(exc).__name__}: {exc}"
     return "SSLEOFError" in s or "EOF occurred in violation of protocol" in s
+
+
+# ── 可选 impersonate 取回(curl_cffi,默认关)─────────────────────────────────
+# 目的:出版商/CDN 对无浏览器指纹的 requests 直连常以 TLS/JA3/HTTP2 指纹判机器人而 403/挂断
+# (「定位到 OA 副本却下不下来」的一大成因)。启用后本客户端改用 curl_cffi 伪装真实浏览器指纹发
+# 起 GET,并【复用】本类既有的重试/退避/限速/熔断——curl_cffi 的网络异常统一归一到 requests 异常
+# 族(见 _do_get),故上层所有分支(SSL 豁免/退避/熔断/限速头自适应)零改动即生效。
+# curl_cffi 为可选依赖:模块级懒探测并缓存(None=未探测 / False=不可用 / 模块=可用),
+# 缺库自动降级回普通 requests,默认零副作用、可一键回退(见 __init__ 开关)。
+_CURL_CFFI: Any = None
+
+
+def _curl_cffi_requests() -> Optional[Any]:
+    """返回 curl_cffi.requests 模块(可用)或 None(未安装/导入失败)。结果模块级缓存,只探测一次。"""
+    global _CURL_CFFI
+    if _CURL_CFFI is None:
+        try:
+            from curl_cffi import requests as _creq  # 延迟导入:可选依赖,不进父包强制依赖
+            _CURL_CFFI = _creq
+        except Exception:  # noqa: BLE001 - 缺库/导入异常一律视作不可用(降级普通 requests)
+            _CURL_CFFI = False
+    return _CURL_CFFI or None
 
 
 # ── 机构订阅 / EZproxy 接入钩子(可插拔,默认关闭)──────────────────────────
@@ -87,19 +116,24 @@ def rewrite_url_for_proxy(url: str, cfg) -> str:
 
     这是「可插拔」的核心扩展点。默认(未配置 ezproxy_prefix,或该 host 无需机构访问)
     时返回原 url(恒等变换)。
+
+    EZproxy 两种常见改写形式均已支持,实现委托给 ezproxy.py(纯字符串变换、离线可测,
+    按 ezproxy_prefix 的形态自动识别;前缀式输出与旧内联实现逐字节一致):
+      1) 前缀式(starting point URL): prefix + quote(原始URL)
+           https://login.ezproxy.uni.edu/login?url=https%3A//www.sciencedirect.com/...
+      2) 主机名改写式(proxy by hostname): 值为裸代理域(如 "ezproxy.uni.edu")时,
+           www.sciencedirect.com → www-sciencedirect-com.ezproxy.uni.edu
     """
     prefix = getattr(cfg, "ezproxy_prefix", None)
     if not prefix:
         return url
     if not needs_institution_access(urlparse(url).netloc, cfg):
         return url
-    # EZproxy 两种常见改写形式(按机构实际部署二选一):
-    #   1) 前缀式(starting point URL): prefix + 原始URL
-    #        https://login.ezproxy.uni.edu/login?url=https://www.sciencedirect.com/...
-    #   2) 主机名改写式(proxy by hostname): host 内嵌机构后缀
-    #        www.sciencedirect.com → www-sciencedirect-com.ezproxy.uni.edu
-    # 下面给出形式 1 的最小可用骨架(最通用);形式 2 留作 TODO 按机构需要扩展。
-    return prefix + quote(url, safe="")
+    try:
+        from .ezproxy import rewrite_url_for_proxy as _rw  # 延迟导入,避免模块级循环依赖
+        return _rw(url, cfg)
+    except ImportError:                       # 极端环境缺模块 → 退回旧内联前缀式,主路径不倒
+        return prefix + quote(url, safe="")
 
 
 class HttpClient:
@@ -117,6 +151,58 @@ class HttpClient:
         # 熔断阈值:连续 N 次「非 SSL」连接类失败才熔断。原为 2,过敏(高峰易误熔);提到 3。
         # SSL 瞬时失败(见 _is_ssl_error)一律不计入本计数,只退避重试。
         self._breaker_threshold = 3
+
+        # ── 可选 impersonate 取回开关(默认关,可一键回退)──────────────────────
+        # 软读:cfg.impersonate_http(父包 Config 默认无此字段=关) 或 环境变量 FTF_IMPERSONATE_HTTP=1。
+        # 目标浏览器指纹软读 cfg.impersonate(缺省 "chrome",与 scholar 子包同名字段对齐)。
+        # curl_cffi 底层 libcurl 句柄非线程安全,故每线程独立 Session(threading.local 惰性创建)。
+        self._impersonate_http: bool = self._resolve_impersonate_flag(config)
+        self._impersonate_target: str = getattr(config, "impersonate", None) or "chrome"
+        self._imp_local = threading.local()
+
+    @staticmethod
+    def _resolve_impersonate_flag(cfg: Any) -> bool:
+        """impersonate 取回是否启用:cfg.impersonate_http 为真,或 env FTF_IMPERSONATE_HTTP=1。
+        两者皆无(默认)→ False(HTTP 行为与未启用逐字节一致)。"""
+        if getattr(cfg, "impersonate_http", False):
+            return True
+        return os.environ.get("FTF_IMPERSONATE_HTTP") == "1"
+
+    def _imp_session(self, creq: Any) -> Any:
+        """取当前线程的 curl_cffi Session(惰性创建,impersonate 目标注入构造)。每线程独立,
+        规避 libcurl 句柄跨线程共享;失败/无该属性时退回模块级 creq(仍可用,仅少连接复用)。"""
+        s = getattr(self._imp_local, "session", None)
+        if s is None:
+            try:
+                s = creq.Session(impersonate=self._impersonate_target)
+            except Exception:  # noqa: BLE001 - 构造失败(版本差异)→ 用模块级函数兜底
+                s = creq
+            self._imp_local.session = s
+        return s
+
+    def _do_get(self, url: str, *, params: Any, headers: Any, stream: bool,
+                allow_redirects: bool) -> Any:
+        """发起一次底层 GET。默认走 requests.Session(既有行为);启用 impersonate 且 curl_cffi
+        可用时改走 curl_cffi(伪装浏览器 TLS/JA3/HTTP2 指纹)。curl_cffi 的网络异常统一转成
+        requests.RequestException,以复用上层既有 SSL 豁免/退避/熔断判定(不改任何既有分支)。
+        缺库 / 关闭时逐字节等价于原 self.session.get。"""
+        if self._impersonate_http:
+            creq = _curl_cffi_requests()
+            if creq is not None:
+                try:
+                    return self._imp_session(creq).get(
+                        url, params=params, headers=headers, timeout=self.cfg.timeout,
+                        stream=stream, allow_redirects=allow_redirects)
+                except requests.RequestException:
+                    raise                          # 已是 requests 异常族:直接上抛,交既有分支处理
+                except Exception as e:  # noqa: BLE001 - curl_cffi.*/CurlError → 归一到 requests 异常族
+                    # 保留原始类型名与消息:含 "EOF occurred in violation of protocol" 时
+                    # _is_ssl_error 仍能据消息识别为瞬时 SSL(不计入熔断),与 requests 路径一致。
+                    raise requests.ConnectionError(
+                        f"curl_cffi: {type(e).__name__}: {e}") from e
+        return self.session.get(
+            url, params=params, headers=headers, timeout=self.cfg.timeout,
+            stream=stream, allow_redirects=allow_redirects)
 
     def set_host_interval(self, host: str, interval: float) -> None:
         """为特定 host 设定更严格的最小间隔(如 arXiv API 要求 3s)。"""
@@ -212,11 +298,10 @@ class HttpClient:
         for attempt in range(self.cfg.max_retries + 1):
             self._respect_rate(url)
             try:
-                r = self.session.get(
+                r = self._do_get(
                     url,
                     params=params,
                     headers=headers,
-                    timeout=self.cfg.timeout,
                     stream=stream,
                     allow_redirects=allow_redirects,
                 )
@@ -264,13 +349,16 @@ if __name__ == "__main__":  # 不联网 selftest: python -m fulltext_fetcher.htt
 
     class _Cfg:
         def __init__(self, max_retries: int = 3, per_host_interval: float = 0.0,
-                     timeout: float = 5.0) -> None:
+                     timeout: float = 5.0, impersonate_http: bool = False,
+                     impersonate: str = "chrome") -> None:
             self.max_retries = max_retries
             self.per_host_interval = per_host_interval
             self.timeout = timeout
             self.ezproxy_prefix = None          # 机构订阅默认关 → needs_institution_access 恒 False
             self.institution_cookie = None
             self.institution_domains = []
+            self.impersonate_http = impersonate_http   # 可选 impersonate 取回开关(默认关)
+            self.impersonate = impersonate             # curl_cffi 伪装目标
 
         def ua(self) -> str:
             return "selftest-ua/1.0"
@@ -366,6 +454,124 @@ if __name__ == "__main__":  # 不联网 selftest: python -m fulltext_fetcher.htt
         assert HttpClient._parse_interval_seconds("2") == 2.0
         assert HttpClient._parse_interval_seconds("") == 0.0
         assert HttpClient._parse_interval_seconds("abc") == 0.0
+
+        # ── ⑩ 可选 impersonate 取回(curl_cffi,默认关)——不改既有 requests 路径 ──
+        # 注:`python -m` 下本文件以 __main__ 执行,与 import 的 fulltext_fetcher.http_client 是两份
+        # 拷贝、各自一份模块全局。被测 HttpClient/_do_get 定义在 __main__,读的是 __main__ 的全局,
+        # 故须对【当前运行模块自身】打桩(_H = 本模块对象),而非 import 的那份,stub 才生效。
+        import sys as _sys
+        _H = _sys.modules[__name__]
+
+        class _FakeCurlSession:
+            """假 curl_cffi Session:按【共享脚本】逐次吐响应/抛异常;记 impersonate 目标与调用数。"""
+
+            def __init__(self, script, impersonate=None):
+                self.script = script            # 共享同一 list(单线程 selftest),便于跨会话累计
+                self.impersonate = impersonate
+                self.calls = 0
+
+            def get(self, url, **kw):  # noqa: ANN001
+                self.calls += 1
+                item = self.script.pop(0) if self.script else _Resp(200)
+                if isinstance(item, BaseException):
+                    raise item
+                return item
+
+        class _FakeCreq:
+            """假 curl_cffi.requests 模块:Session(impersonate=...) 返回吃共享脚本的假会话。"""
+
+            def __init__(self, script):
+                self._script = list(script)
+                self.sessions = []
+
+            def Session(self, impersonate=None, **kw):  # noqa: ANN001,N802 - 对齐 curl_cffi API
+                s = _FakeCurlSession(self._script, impersonate=impersonate)
+                self.sessions.append(s)
+                return s
+
+        def _imp_client(script, creq, **cfgkw):
+            """构造启用 impersonate 的 client,并注入假 curl_cffi 模块缓存;不替换 self.session。"""
+            c = HttpClient(_Cfg(impersonate_http=True, **cfgkw), _NullLog())
+            _H._CURL_CFFI = creq                 # 直接置模块级缓存(truthy→_curl_cffi_requests 返回它)
+            return c
+
+        _saved_curl = _H._CURL_CFFI
+        _saved_env = os.environ.pop("FTF_IMPERSONATE_HTTP", None)
+        try:
+            # ⑩a 默认关:_impersonate_http False,走 requests(self.session);既有 ①–⑨ 已覆盖等价性
+            _H._CURL_CFFI = None
+            c_off = HttpClient(_Cfg(), _NullLog())
+            assert c_off._impersonate_http is False, c_off._impersonate_http
+
+            # ⑩b 开关经 env 打开:FTF_IMPERSONATE_HTTP=1 → 启用
+            os.environ["FTF_IMPERSONATE_HTTP"] = "1"
+            assert HttpClient._resolve_impersonate_flag(_Cfg()) is True
+            os.environ.pop("FTF_IMPERSONATE_HTTP", None)
+            assert HttpClient._resolve_impersonate_flag(_Cfg()) is False
+            assert HttpClient._resolve_impersonate_flag(_Cfg(impersonate_http=True)) is True
+
+            # ⑩c 开启但 curl_cffi 不可用(缓存=False)→ 降级 self.session,行为与既有一致
+            _H._CURL_CFFI = False
+            c_na = HttpClient(_Cfg(impersonate_http=True), _NullLog())
+            c_na.session = _Session([_Resp(200)])   # type: ignore[assignment]
+            rna = c_na.get("https://api.crossref.org/works")
+            assert rna is not None and rna.status_code == 200 and c_na.session.calls == 1, rna
+
+            # ⑩d 开启且 curl_cffi 可用:走 curl_cffi 路径;impersonate 目标注入构造;429 退避后成功
+            fake1 = _FakeCreq([_Resp(429), _Resp(200)])
+            c1 = _imp_client([], fake1, max_retries=3)
+            r_imp = c1.get("https://pubs.acs.org/x")
+            assert r_imp is not None and r_imp.status_code == 200, r_imp
+            assert fake1.sessions and fake1.sessions[0].impersonate == "chrome", fake1.sessions
+            assert fake1.sessions[0].calls == 2, fake1.sessions[0].calls   # 429 → 重试 → 200
+
+            # ⑩e impersonate 目标可软配(cfg.impersonate=safari)
+            fake2 = _FakeCreq([_Resp(200)])
+            c2 = _imp_client([], fake2, impersonate="safari")
+            assert c2.get("https://x.test/a").status_code == 200
+            assert fake2.sessions[0].impersonate == "safari", fake2.sessions[0].impersonate
+
+            # ⑩f curl_cffi 抛【自有】网络异常 → 归一为 requests.ConnectionError → 计入熔断(阈值 3)
+            class _CurlErr(Exception):   # 模拟 curl_cffi.requests.errors.RequestsError / CurlError
+                pass
+
+            fake3 = _FakeCreq([_CurlErr("connect fail")] * 5)
+            c3 = _imp_client([], fake3, max_retries=10)
+            r3 = c3.get("https://dead.impersonate.test/x")
+            assert r3 is None and "dead.impersonate.test" in c3._host_down, (r3, c3._host_down)
+            assert fake3.sessions[0].calls == 3, fake3.sessions[0].calls   # 阈值 3 → 第 3 次熔断
+
+            # ⑩g curl_cffi 抛的异常消息含 SSLEOF 特征 → 归一后仍被 _is_ssl_error 识别(不计入熔断)
+            fake4 = _FakeCreq([
+                _CurlErr("Recv failure: EOF occurred in violation of protocol"),
+                _CurlErr("Recv failure: EOF occurred in violation of protocol"),
+                _Resp(200)])
+            c4 = _imp_client([], fake4, max_retries=3)
+            r4 = c4.get("https://zenodo.org/api/records")
+            assert r4 is not None and r4.status_code == 200, r4
+            assert "zenodo.org" not in c4._host_down and c4._host_fail.get("zenodo.org", 0) == 0, \
+                (c4._host_down, c4._host_fail)
+        finally:
+            _H._CURL_CFFI = _saved_curl
+            if _saved_env is not None:
+                os.environ["FTF_IMPERSONATE_HTTP"] = _saved_env
+            else:
+                os.environ.pop("FTF_IMPERSONATE_HTTP", None)
+
+        # ── ⑪ EZproxy 改写钩子:委托 ezproxy.py 双模式(前缀式与旧内联逐字节一致 + 主机名式)──
+        _SD = "https://www.sciencedirect.com/science/article/pii/S0926860X05002504/pdfft"
+        _cfg11 = _Cfg()
+        assert rewrite_url_for_proxy(_SD, _cfg11) == _SD          # 默认三字段空 → 恒等
+        _cfg11.ezproxy_prefix = "https://login.ezproxy.uni.edu/login?url="
+        _cfg11.institution_cookie = "ezproxy=T"
+        _cfg11.institution_domains = ["sciencedirect.com"]
+        assert rewrite_url_for_proxy(_SD, _cfg11) \
+            == _cfg11.ezproxy_prefix + quote(_SD, safe="")        # 前缀式:与旧实现逐字节一致
+        assert rewrite_url_for_proxy("https://api.unpaywall.org/v2/x", _cfg11) \
+            == "https://api.unpaywall.org/v2/x"                   # OA 域名恒等
+        _cfg11.ezproxy_prefix = "ezproxy.uni.edu"                 # 裸代理域 → 主机名改写式
+        assert rewrite_url_for_proxy(_SD, _cfg11) \
+            == "https://www-sciencedirect-com.ezproxy.uni.edu/science/article/pii/S0926860X05002504/pdfft"
 
         print("HTTP_CLIENT_OK")
     finally:

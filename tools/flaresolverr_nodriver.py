@@ -269,6 +269,74 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, result)
 
 
+def _free_port() -> int:
+    """取一个空闲的本地 TCP 端口(selftest 用,避免与常驻实例/其它进程抢端口)。"""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+    finally:
+        s.close()
+
+
+def selftest() -> int:
+    """**可选联网**自检:起 headless 浏览器 + 临时 /v1 服务,走一次完整 HTTP 往返求解一个
+    无 CF 的安全站点(example.com),校验健康检查 + solution 契约齐全,成功打印
+    ``FLARESOLVERR_NODRIVER_OK`` 并退出 0;任何失败(含无 Chrome/nodriver)→ 非 0。
+
+    需真实浏览器与出网,故**不纳入默认离线回归**;由 run_all_selftests.py 在
+    ``RUN_ONLINE_SELFTESTS=1`` 时才触发(见该文件 ONLINE_CHECKS)。
+    """
+    import urllib.request
+
+    port = _free_port()
+    print(f"[selftest] booting headless nodriver + /v1 on 127.0.0.1:{port} ...", flush=True)
+    solver = Solver(headless=True, cache_ttl=1200.0, page_wait=3.0)
+    try:
+        solver.start()
+    except Exception as e:  # noqa: BLE001 - 无 Chrome/无 nodriver 等环境问题
+        print(f"[selftest] FAILED: browser start error: {type(e).__name__}: {e}", flush=True)
+        return 1
+
+    Handler.solver = solver
+    httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    th = threading.Thread(target=httpd.serve_forever, name="selftest-http", daemon=True)
+    th.start()
+    base = f"http://127.0.0.1:{port}"
+    try:
+        health = urllib.request.urlopen(base + "/", timeout=10).read().decode("utf-8", "replace")
+        assert "FlareSolverr is ready" in health, f"unexpected health body: {health!r}"
+
+        payload = json.dumps({"cmd": "request.get", "url": "https://example.com/",
+                              "maxTimeout": 15000}).encode("utf-8")
+        req = urllib.request.Request(base + "/v1", data=payload, method="POST",
+                                     headers={"Content-Type": "application/json"})
+        body = urllib.request.urlopen(req, timeout=90).read().decode("utf-8", "replace")
+        resp = json.loads(body)
+        assert resp.get("status") == "ok", f"status != ok: {resp.get('status')} / {resp.get('message')}"
+        sol = resp.get("solution") or {}
+        assert sol.get("response"), "solution.response 为空"
+        assert sol.get("userAgent"), "solution.userAgent 缺失"
+        print(f"[selftest] health OK; solve OK (html={len(sol['response'])}B, "
+              f"ua={sol['userAgent'][:40]!r})", flush=True)
+        print("FLARESOLVERR_NODRIVER_OK", flush=True)
+        return 0
+    except Exception as e:  # noqa: BLE001
+        print(f"[selftest] FAILED: {type(e).__name__}: {e}", flush=True)
+        return 1
+    finally:
+        try:
+            httpd.shutdown()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            if solver._browser:
+                solver._browser.stop()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Docker-free FlareSolverr-compatible endpoint (nodriver).")
     ap.add_argument("--host", default="127.0.0.1")
@@ -276,7 +344,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--headless", action="store_true", help="无头模式(默认有头,CF 通过率更高)")
     ap.add_argument("--cache-ttl", type=float, default=1200.0, help="cf_clearance 按 origin 缓存秒数")
     ap.add_argument("--page-wait", type=float, default=6.0, help="每次导航后的基础等待秒(过 CF/渲染)")
+    ap.add_argument("--selftest", action="store_true",
+                    help="可选联网自检(起 headless+/v1,真解 example.com 校验契约),打印 FLARESOLVERR_NODRIVER_OK")
     args = ap.parse_args(argv)
+
+    if args.selftest:
+        return selftest()
 
     print(f"[boot] starting nodriver browser (headless={args.headless}) ...", flush=True)
     solver = Solver(headless=args.headless, cache_ttl=args.cache_ttl, page_wait=args.page_wait)

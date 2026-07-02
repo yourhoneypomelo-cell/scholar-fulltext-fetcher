@@ -284,6 +284,267 @@ def _client_get(client: Any, url: str, headers: Optional[dict] = None):
         return client.get(url, stream=True)
 
 
+def _safe_log(log: Any, fmt: str, *args: Any) -> None:
+    """尽力记一行 info 日志:log 为 None / 无 info / 抛错一律静默(记日志绝不影响主下载流程)。"""
+    if log is None:
+        return
+    info = getattr(log, "info", None)
+    if not callable(info):
+        return
+    try:
+        info(fmt, *args)
+    except Exception:  # noqa: BLE001 - 记日志失败绝不能影响主流程
+        pass
+
+
+# ────────────────── 内容 QC 门(P0:记 success 前的标题/DOI 比对) ──────────────────
+# 背景:审计实锤 websearch 兜底存在系统性"错论文"假阳(如同一 nature PDF 被当成 4 个 RSC DOI 的答案;
+# 10.1002/cssc.201601217 落盘成皮肤病 jaad 论文)。根因:下载校验只看 %PDF+体积,不核对"是不是这篇"。
+# 据此:对**非 DOI-keyed 来源**(靠自由文本/标题/URL 搜索,或解析任意落地页定位 PDF —— websearch /
+# wayback / browser_search 及任何经 +landing 解析者)在落盘记 success 前加一道比对门;**DOI-keyed 源**
+# (unpaywall/openalex/publisher_oa/crossref/S2/snapshot… 按 DOI 直取、假阳风险低)默认豁免,避免误杀
+# 绿OA预印本/译名/子标题的真命中。总开关 cfg.content_qc(默认 True)可整体回退。
+_QC_GATE_SOURCE_MARKERS = ("websearch", "wayback", "browser_search", "landing")
+
+
+def _source_needs_content_qc(source: Any, cfg: Any) -> bool:
+    """该来源是否需过内容 QC 门:cfg.content_qc 开启 且 source 命中非 DOI-keyed marker。
+
+    marker 覆盖复合 source 串(如 "websearch+landing"、"unpaywall+landing")——只要经过自由搜索或
+    落地页解析这一步就进门;纯 DOI 直取的源(source 不含任何 marker)一律豁免。cfg 无 content_qc
+    字段时默认视为开(getattr 兜底),故 selftest 的精简 cfg 亦按默认启用。
+    """
+    if not getattr(cfg, "content_qc", True):
+        return False
+    s = str(source or "").lower()
+    return any(m in s for m in _QC_GATE_SOURCE_MARKERS)
+
+
+def _extract_pdf_text_meta(data: bytes, max_pages: int = 2, max_chars: int = 6000):
+    """从 PDF 字节抽 (元数据 title, 首 max_pages 页正文文本);缺 pypdf / 任何异常 → (None, None)。
+
+    与 D2 的 _pdf_page_defect 同哲学:延迟取 pypdf(可选依赖),不可用即降级(交由门放行,绝不误杀)。
+    """
+    reader = _pdf_reader()
+    if reader is None:
+        return None, None
+    import io
+    try:
+        r = reader(io.BytesIO(data))
+        meta_title = None
+        try:
+            md = r.metadata
+            if md and getattr(md, "title", None):
+                meta_title = str(md.title)
+        except Exception:  # noqa: BLE001 - 元数据缺失/畸形 → 无 meta_title
+            meta_title = None
+        parts = []
+        for pg in r.pages[:max_pages]:
+            try:
+                parts.append(pg.extract_text() or "")
+            except Exception:  # noqa: BLE001 - 单页抽取失败跳过,不影响其它页
+                continue
+            if sum(len(x) for x in parts) >= max_chars:
+                break
+        return meta_title, (" ".join(parts))[:max_chars]
+    except Exception:  # noqa: BLE001 - 解析失败 → 降级(门放行)
+        return None, None
+
+
+def _qc_matchers():
+    """(延迟、异常安全)复用 151 的 tools/qc_content_match 匹配原语,绝不重复造匹配逻辑。
+
+    取 clean_title / norm_for_doi / is_unextractable / token_set_ratio 与阈值 MATCH_HI/MISMATCH_LO。
+    该模块顶层在缺 pypdf 时会 sys.exit(3)(SystemExit,非 Exception 子类),故这里用 (Exception, SystemExit)
+    兜底:任何导入失败(缺模块/缺 pypdf)→ None(门降级为放行)。命中返回 dict 供 _content_qc_verdict 复用。
+    """
+    try:
+        from tools.qc_content_match import (  # type: ignore
+            MATCH_HI, MISMATCH_LO, clean_title, is_unextractable,
+            norm_for_doi, token_set_ratio,
+        )
+    except (Exception, SystemExit):  # noqa: BLE001 - 含缺 pypdf 时模块顶层 sys.exit(3)
+        return None
+    return {
+        "clean_title": clean_title,
+        "norm_for_doi": norm_for_doi,
+        "is_unextractable": is_unextractable,
+        "token_set_ratio": token_set_ratio,
+        "match_hi": MATCH_HI,
+        "mismatch_lo": MISMATCH_LO,
+    }
+
+
+# ── 第二信号(跨社"错论文"佐证)所需的出版商映射 ──────────────────────────────
+# 判定沿革(两轮校正,定稿=双门 union):第一轮曾疑"标题法过判"而取交集(标题不符 AND 跨社
+# 第二信号);第二轮审计逐条交叉验证实锤——content-mismatch(标题分<50)≈100% 准,且 189 条
+# 同域错论文(publisher 桶 61 + repository 桶 128:同社他篇,如 Springer DOI→另一篇 Springer
+# 论文,URL host 同社、正文 DOI 同社前缀;或仓库托管他篇)跨社信号根本不触发,交集会整批放行。
+# 故定稿【并集】:硬拒 = 门①标题明确不符(<mismatch_lo,能抽出正文) OR 门②第二信号(URL 嵌
+# 异 DOI / 正文首部异社 DOI / URL host 跨社)。uncertain[mismatch_lo,match_hi) / 扫描件 /
+# 门②两侧出版商未知 → 放行打标(不拒)。跨社按【出版商标签】判(非 DOI 前缀:同社多前缀如
+# Wiley 10.1002/10.1111 不算跨社)。映射为 QC 专用、比 publisher_adapter 注册表更广;可据审计
+# "高置信错论文集"扩充/校准。
+_QC_DOI_RE = re.compile(r"10\.\d{4,9}/[^\s\"'<>?#)\]]+")
+_QC_PREFIX_LABELS = {
+    "10.1016": "elsevier", "10.1021": "acs", "10.1039": "rsc", "10.1007": "springer",
+    "10.1002": "wiley", "10.1111": "wiley", "10.3390": "mdpi", "10.1088": "iop",
+    "10.1109": "ieee", "10.1038": "nature", "10.1126": "aaas", "10.1073": "pnas",
+    "10.1103": "aps", "10.1063": "aip", "10.1093": "oup", "10.1080": "tandf",
+    "10.1177": "sage", "10.1136": "bmj", "10.1371": "plos", "10.1186": "bmc",
+    "10.3389": "frontiers", "10.1145": "acm", "10.1049": "iet",
+}
+_QC_HOST_LABELS = {
+    "pubs.acs.org": "acs", "sciencedirect.com": "elsevier", "link.springer.com": "springer",
+    "onlinelibrary.wiley.com": "wiley", "pubs.rsc.org": "rsc", "iopscience.iop.org": "iop",
+    "mdpi.com": "mdpi", "ieeexplore.ieee.org": "ieee", "nature.com": "nature",
+    "science.org": "aaas", "pnas.org": "pnas", "journals.aps.org": "aps",
+    "academic.oup.com": "oup", "tandfonline.com": "tandf", "journals.sagepub.com": "sage",
+    "journals.plos.org": "plos", "biomedcentral.com": "bmc", "frontiersin.org": "frontiers",
+    "dl.acm.org": "acm",
+}
+_QC_DOI_PREFIX_RE = re.compile(r"\s*(?:https?://(?:dx\.)?doi\.org/|doi:)?\s*(10\.\d{4,9})/", re.I)
+
+
+def _qc_prefix_label(doi: Any) -> Optional[str]:
+    """DOI → 出版商标签(按 10.xxxx 前缀查 _QC_PREFIX_LABELS);未知/非法 → None。"""
+    if not doi:
+        return None
+    m = _QC_DOI_PREFIX_RE.match(str(doi))
+    if not m:
+        return None
+    return _QC_PREFIX_LABELS.get(m.group(1).lower())
+
+
+def _qc_host_label(url: Any) -> Optional[str]:
+    """URL host → 已知出版商标签;非出版商 host(仓储/自存稿/doi.org)→ None(不作跨社佐证)。"""
+    try:
+        host = (urlsplit(str(url)).hostname or "").lower()
+    except Exception:  # noqa: BLE001 - 畸形 URL → 无 host 标签
+        return None
+    if not host:
+        return None
+    for h, lab in _QC_HOST_LABELS.items():
+        if host == h or host.endswith("." + h):
+            return lab
+    return None
+
+
+def _qc_doi_publisher_conflict(url: Any, text: Any, exp_doi: Any, norm_for_doi) -> Tuple[bool, str]:
+    """门②(URL/嵌入 DOI 佐证"错论文",独立于标题;专堵 title 假匹配,如 frontiersin / 未来年份 DOI):
+      (a) URL 里嵌了一个与期望【不同】的完整 DOI —— URL 是取件来源、无参考文献噪声,最强(异 DOI 即错);
+      (b) 正文首 1200 字(规避参考文献区)出现另一家【已知出版商】的 DOI;
+      (c) URL host 属另一家【已知出版商】。
+    仅在期望 DOI 已确认不在 URL/正文(见 verdict 门前 match 判定)后调用。exp_doi 缺失 → False。
+    (b)/(c) 需两侧出版商都已知(高置信,规避误伤);(a) 只需 URL 内 DOI 与期望不同即判。
+    """
+    if not exp_doi:
+        return False, "no-expected-doi"
+    en = norm_for_doi(exp_doi)
+    for mobj in _QC_DOI_RE.finditer(str(url or "")):
+        if norm_for_doi(mobj.group(0)) != en:
+            return True, f"url-embeds-different-doi:{mobj.group(0)[:48]}"
+    exp_label = _qc_prefix_label(exp_doi)
+    if exp_label:
+        for mobj in _QC_DOI_RE.finditer(str(text or "")[:1200]):
+            lab = _qc_prefix_label(mobj.group(0))
+            if lab and lab != exp_label and norm_for_doi(mobj.group(0)) != en:
+                return True, f"header-doi-cross-publisher:{lab}!={exp_label}"
+    hlab = _qc_host_label(url)
+    if exp_label and hlab and hlab != exp_label:
+        return True, f"url-host-cross-publisher:{hlab}!={exp_label}"
+    return False, "no-conflict"
+
+
+def _content_qc_verdict(url, meta_title, text, exp_title, exp_doi, m):
+    """判定 (verdict, score, reason);**双门 union**(总指挥二次校正:审计逐条交叉验证确认标题法
+    mismatch 属实、非过判——350 条真错论文 URL 法看不到,故不能只取交集)。
+
+    记 success 需"内容标题匹配 AND URL-DOI 一致",**任一为错即 mismatch**:
+      ① 强正:期望 DOI 出现在正文/URL → match(该 PDF 确为这篇,压过下面两门);
+      ② 门①内容:能抽出正文且标题分 < mismatch_lo(明确他题)→ mismatch(拦 URL 法看不到的真错论文);
+      ③ 门②URL/嵌入:URL 或正文首部佐证异出版商/异 DOI(即便标题模糊命中)→ mismatch(拦 title 假匹配);
+      ④ 标题分 >= match_hi → match;
+      ⑤ 抽不出正文(扫描)/ 无期望标题 / 中间带 → uncertain(放行打标,绝不误杀 undecidable)。
+    """
+    clean_title = m["clean_title"]
+    norm_for_doi = m["norm_for_doi"]
+    is_unextractable = m["is_unextractable"]
+    token_set_ratio = m["token_set_ratio"]
+    match_hi = m["match_hi"]
+    mismatch_lo = m["mismatch_lo"]
+
+    if exp_doi:
+        en = norm_for_doi(exp_doi)
+        if en and (en in norm_for_doi(text or "") or en in norm_for_doi(url or "")):
+            return "match", 100.0, "expected-doi-present"
+
+    exp = clean_title(exp_title)
+    meta_score = token_set_ratio(exp, clean_title(meta_title)) if (exp and meta_title) else -1.0
+    body_score = token_set_ratio(exp, clean_title(text)) if (exp and text) else -1.0
+    score = max(meta_score, body_score)
+    scanned = is_unextractable(text)
+
+    # 门①:能抽出正文且标题明确不符(< mismatch_lo)→ mismatch(扫描件不走此门,避免误杀 undecidable)
+    if (not scanned) and (0 <= score < mismatch_lo):
+        return "mismatch", score, f"content-title-mismatch(<{mismatch_lo})"
+    # 门②:URL/嵌入 DOI 异出版商/异 DOI(即便标题命中)→ mismatch
+    conflict, why2 = _qc_doi_publisher_conflict(url, text, exp_doi, norm_for_doi)
+    if conflict:
+        return "mismatch", score, f"url-doi-conflict({why2})"
+
+    if score >= match_hi:
+        return "match", score, "title-match"
+    if scanned:
+        return "uncertain", score, "scanned/no-extractable-text"
+    if score < 0:
+        return "uncertain", score, "no-expected-title"
+    return "uncertain", score, "partial-title-overlap"
+
+
+def _content_qc_gate(data: bytes, paper: Any, source: Any, url: Any, cfg: Any, log: Any,
+                     events: Any = None) -> Optional[str]:
+    """内容 QC 门:非 DOI-keyed 来源在记 success 前做标题/DOI 比对(复用 151 匹配原语)。
+
+    返回:判为高置信错论文(mismatch=标题明确不符 OR 跨社第二信号,双门 union)→ 返回
+    "content-mismatch(...)" 原因串(调用方据此判失败、不落盘);其余(match / uncertain / 豁免源 /
+    缺库 / 无锚点 / 任何异常)→ None(放行)。绝不抛、不误杀 undecidable:抽不出正文(扫描)、
+    中间带 [mismatch_lo,match_hi)、无期望标题/DOI、缺 pypdf 或 151 模块一律放行。uncertain→放行并
+    记 qc_uncertain(log + 结构化事件 content_qc,便于 attempts.jsonl 审计);mismatch 同时记事件与
+    失败原因。
+    """
+    if not _source_needs_content_qc(source, cfg):
+        return None
+    exp_title = getattr(paper, "title", None)
+    doi = getattr(paper, "doi", None)
+    if not exp_title and not doi:
+        return None                              # 无任何可比对锚点 → 放行(不误杀)
+    m = _qc_matchers()
+    if m is None:
+        return None                              # 缺 151 模块 / 缺 pypdf/rapidfuzz → 降级放行
+    try:
+        meta_title, text = _extract_pdf_text_meta(data)
+        verdict, score, reason = _content_qc_verdict(url, meta_title, text, exp_title, doi, m)
+    except Exception as e:  # noqa: BLE001 - 门绝不能让主流程崩;任何异常一律放行
+        _safe_log(log, "content-qc 异常(放行) source=%s: %s", source, e)
+        return None
+
+    _title = (str(exp_title)[:200] if exp_title else None)
+    if verdict == "mismatch":
+        _safe_log(log, "content-qc 判失败(疑似错论文) source=%s doi=%s score=%.1f: %s",
+                  source, doi, score, reason)
+        _emit_event(events, "content_qc", verdict="mismatch", source=source, doi=doi,
+                    title=_title, score=round(float(score), 1), reason=reason)
+        return f"content-mismatch(score={score:.1f};{reason})"
+    if verdict == "uncertain":
+        _safe_log(log, "content-qc 存疑放行·标记 qc_uncertain source=%s doi=%s score=%s: %s",
+                  source, doi, (round(float(score), 1) if score >= 0 else "n/a"), reason)
+        _emit_event(events, "content_qc", verdict="uncertain", source=source, doi=doi,
+                    title=_title, score=(round(float(score), 1) if score >= 0 else None),
+                    reason=reason)
+    return None
+
+
 def _download_pdf_core(
     candidate: Any,
     paper: Any,
@@ -294,6 +555,7 @@ def _download_pdf_core(
     fallback_name: str,
     allow_landing: bool = True,
     headers: Optional[dict] = None,
+    events: Any = None,
 ) -> Tuple[Optional[str], int, Optional[str]]:
     """核心下载+校验(既有逻辑不变)。headers 可选透传给 client.get 用于内容协商。
 
@@ -345,6 +607,11 @@ def _download_pdf_core(
         if defect:
             # 结构不可解析(多为下载被截断/损坏)→ 判失败、不落盘,原因入 attempts。
             return None, len(data), f"corrupt-pdf({defect})"
+        # 内容 QC 门(P0):非 DOI-keyed 来源记 success 前核对"是不是这篇";高置信错论文(标题不符+第二信号)→ 判失败不落盘。
+        qc = _content_qc_gate(data, paper, getattr(candidate, "source", ""),
+                              getattr(candidate, "url", ""), cfg, log, events)
+        if qc:
+            return None, len(data), qc
         return _save(data, paper, pdf_dir, fallback_name), len(data), None
 
     # 非 PDF:若像 HTML 落地页,解析内嵌 PDF 链接再走一层
@@ -356,7 +623,8 @@ def _download_pdf_core(
             sub = PdfCandidate(purl, candidate.source + "+landing", "pdf",
                                candidate.version, candidate.license, candidate.confidence)
             p, b, _ = _download_pdf_core(sub, paper, pdf_dir, client, cfg, log,
-                                         fallback_name, allow_landing=False, headers=headers)
+                                         fallback_name, allow_landing=False, headers=headers,
+                                         events=events)
             if p:
                 log.info("落地页解析命中内嵌 PDF: %s", purl)
                 return p, b, None
@@ -725,7 +993,7 @@ def download_pdf(
     便于统计。缺省 None / FlareSolverr 未启用 → 不记任何 flaresolverr 事件(零副作用,默认行为不变)。
     """
     result = _download_pdf_core(candidate, paper, pdf_dir, client, cfg, log,
-                                fallback_name, allow_landing=allow_landing)
+                                fallback_name, allow_landing=allow_landing, events=events)
     if result[0] is not None:
         return result
 
@@ -1103,6 +1371,197 @@ def _selftest() -> None:
         ps2, nsz2, es2 = download_pdf(_SelfCand("https://sci-hub.se/10.1/x.pdf"), _SelfPaper(), d,
                                       _SelfClient(good), _CfgSci(), log, "sh2")
         assert ps2 and es2 is None and nsz2 == len(good), (ps2, nsz2, es2)
+
+    # ── ⑦ 内容 QC 门(P0):非 DOI-keyed 来源记 success 前【双门 union】,任一为错即拒 ──
+    # 总指挥二次校正:审计逐条交叉验证确认 151 标题法 mismatch 属实(350 条真错论文 URL 法看不到),
+    # 故【不能只取交集】。改为 union:① 能抽出正文且标题<50(明确他题)→拒;② URL/正文首部佐证异出版商
+    # /异 DOI(即便标题模糊命中,专堵 title 假匹配如 frontiersin/未来年份 DOI)→拒;uncertain/scanned 放行打标。
+    # 注:统一走 `_dl.`(真实 fulltext_fetcher.download 模块对象)以便 monkeypatch 与被测函数同处一个
+    # 模块命名空间——与 ①b 的 _pdf_reader 打桩同理(`python -m` 下 __main__ 与 _dl 是两份拷贝)。
+    _SelfCfgQC = _SelfCfg
+
+    class _CfgQCOff(_SelfCfg):
+        content_qc = False
+
+    class _QCCand:
+        def __init__(self, source, url):
+            self.url, self.source, self.kind = url, source, "pdf"
+            self.version = self.license = None
+            self.confidence = 1.0
+
+    class _QCPaper:
+        # 期望 DOI 用 PLOS(10.1371):QC 出版商映射里"已知",但不在 publisher_adapter 注册表 → 端到端
+        # 测试不会触发 publisher 兜底干扰,隔离验证门本身。跨社佐证用 nature(10.1038)。
+        doi = "10.1371/journal.pone.0000001"
+        arxiv_id = None
+        title = "Electrocatalytic CO2 reduction to multicarbon products on copper catalysts"
+
+    _JAAD = "atopic dermatitis a review of skin barrier dysfunction and treatment options in children"
+    _MATCH_BODY = "electrocatalytic co2 reduction to multicarbon products on copper catalysts hi"
+    _PARTIAL = "multicarbon products electrocatalysis review"   # 与期望标题分≈66(∈[50,70) 中间带)
+
+    # ⑦.0 源分类:非 DOI-keyed(websearch/wayback/browser_search/经 +landing 解析)进门;DOI-keyed 豁免;开关可关
+    assert _dl._source_needs_content_qc("websearch", _SelfCfgQC())
+    assert _dl._source_needs_content_qc("websearch+landing", _SelfCfgQC())
+    assert _dl._source_needs_content_qc("wayback", _SelfCfgQC())
+    assert _dl._source_needs_content_qc("browser_search", _SelfCfgQC())
+    assert _dl._source_needs_content_qc("unpaywall+landing", _SelfCfgQC())    # 经落地页解析 → 进门
+    assert not _dl._source_needs_content_qc("unpaywall", _SelfCfgQC())        # DOI 直取 → 豁免
+    assert not _dl._source_needs_content_qc("openalex", _SelfCfgQC())
+    assert not _dl._source_needs_content_qc("publisher_oa", _SelfCfgQC())
+    assert not _dl._source_needs_content_qc("crossref", _SelfCfgQC())
+    assert not _dl._source_needs_content_qc("snapshot", _SelfCfgQC())
+    assert not _dl._source_needs_content_qc("websearch", _CfgQCOff())         # 开关关 → 全豁免
+
+    _matchers = _dl._qc_matchers()
+    if _matchers is not None:
+        _V = _dl._content_qc_verdict
+        # ⑦.1 verdict 纯逻辑(签名:url, meta_title, text, exp_title, exp_doi, m)——双门 union
+        # match:期望 DOI 出现在正文(压过两门)
+        v, sc, _r = _V("http://x/a.pdf", None, "see doi 10.1371/journal.pone.0000001 here",
+                       "totally unrelated expected title", "10.1371/journal.pone.0000001", _matchers)
+        assert v == "match", (v, sc, _r)
+        # match:标题强命中 + URL 无冲突
+        v, sc, _r = _V("http://x/a.pdf", None, _MATCH_BODY, _QCPaper.title, None, _matchers)
+        assert v == "match", (v, sc, _r)
+        # 门①:标题明确不符(<50)且能抽出正文、URL 无冲突 → mismatch(拦 URL 法看不到的真错论文)
+        v, sc, _r = _V("http://x/paper.pdf", None, _JAAD, _QCPaper.title, _QCPaper.doi, _matchers)
+        assert v == "mismatch", (v, sc, _r)
+        # 门①·同社错论文(返工关键回归):Springer DOI→另一篇 Springer 论文——URL host 同社
+        # (link.springer.com、无嵌入 DOI)、正文 DOI 同社前缀(10.1007)→ 跨社第二信号【不触发】。
+        # 旧「交集(标题不符 AND 跨社信号)」在此必放行(错);审计实锤同域错论文 189 条
+        # (publisher 61 + repository 128)且 content-mismatch(标题<50)~100% 准 → 并集单信号即硬拒。
+        _SPR_DOI = "10.1007/s00542-020-04771-3"
+        _SPR_URL = "https://link.springer.com/content/pdf/wrong-paper.pdf"   # 同社 host、无 DOI 嵌入
+        _SPR_WRONG = ("microbial electrosynthesis of acetate from carbon dioxide in "
+                      "bioelectrochemical systems doi 10.1007/s00253-999-0001-2 springer")
+        _conf, _why = _dl._qc_doi_publisher_conflict(_SPR_URL, _SPR_WRONG, _SPR_DOI,
+                                                     _matchers["norm_for_doi"])
+        assert not _conf, (_conf, _why)   # 先证:同社场景第二信号确实不触发(交集在此必放行)
+        v, sc, _r = _V(_SPR_URL, None, _SPR_WRONG, _QCPaper.title, _SPR_DOI, _matchers)
+        assert v == "mismatch" and "content-title-mismatch" in _r, (v, sc, _r)  # 并集:标题单信号即拒
+        # 门②:标题【强命中】但 URL 嵌异 DOI(nature)→ mismatch(专堵 title 假匹配)
+        v, sc, _r = _V("https://repo.example.org/10.1038/s41586-1.pdf", None, _MATCH_BODY,
+                       _QCPaper.title, _QCPaper.doi, _matchers)
+        assert v == "mismatch", (v, sc, _r)
+        # 门②:标题【强命中】但 URL host 跨社(nature.com vs plos)→ mismatch
+        v, sc, _r = _V("https://www.nature.com/articles/x.pdf", None, _MATCH_BODY,
+                       _QCPaper.title, _QCPaper.doi, _matchers)
+        assert v == "mismatch", (v, sc, _r)
+        # 门②:即便抽不出正文(scanned),URL 嵌异 DOI 仍 → mismatch(门②独立于内容可读性)
+        v, sc, _r = _V("https://repo.org/10.1038/s41586-1.pdf", None, "", _QCPaper.title, _QCPaper.doi, _matchers)
+        assert v == "mismatch", (v, sc, _r)
+        # uncertain:中间带(≈66)、URL 无冲突 → 放行打标(不误杀)
+        v, sc, _r = _V("http://x/a.pdf", None, _PARTIAL, _QCPaper.title, _QCPaper.doi, _matchers)
+        assert v == "uncertain", (v, sc, _r)
+        # uncertain:抽不出正文、URL 无冲突 → 放行
+        v, sc, _r = _V("http://x/a.pdf", None, "", _QCPaper.title, _QCPaper.doi, _matchers)
+        assert v == "uncertain", (v, sc, _r)
+        # uncertain:无期望标题、URL 无冲突 → 放行
+        v, sc, _r = _V("http://x/a.pdf", None, "long extractable readable body text here", "", None, _matchers)
+        assert v == "uncertain", (v, sc, _r)
+        # 门②(a):期望出版商未知(前缀不在映射)但 URL 嵌异 DOI → 仍 mismatch(异 DOI 即错,不需已知出版商)
+        v, sc, _r = _V("https://repo.org/10.1038/s41586-1.pdf", None, "quantum widget synthesis advanced methods",
+                       "quantum widget synthesis", "10.9999/unknown.1", _matchers)
+        assert v == "mismatch", (v, sc, _r)
+        # 门②(b/c):期望出版商未知 + 无 URL DOI + 正文有跨社 DOI → 不冲突(b/c 需两侧已知)→ 标题命中 → match
+        v, sc, _r = _V("http://x/a.pdf", None, "quantum widget synthesis 10.1038/s41586-1 methods",
+                       "quantum widget synthesis", "10.9999/unknown.1", _matchers)
+        assert v == "match", (v, sc, _r)
+
+        _saved_extract = _dl._extract_pdf_text_meta
+        try:
+            # ⑦.2 端到端 门①:websearch + 标题明确不符(URL 无冲突)→ content-mismatch、不落盘
+            _dl._extract_pdf_text_meta = lambda data, *a, **k: (None, _JAAD)
+            with tempfile.TemporaryDirectory() as d:
+                before = set(os.listdir(d))
+                pqc, nqc, eqc = _dl.download_pdf(_QCCand("websearch", "http://x/ws_wrong.pdf"),
+                                                 _QCPaper(), d, _SelfClient(good), _SelfCfgQC(), log, "ws")
+                assert pqc is None and eqc and eqc.startswith("content-mismatch("), (pqc, nqc, eqc)
+                assert set(os.listdir(d)) == before, "内容标题他题不应落盘"
+
+            # ⑦.2b 端到端 门①·同社错论文:websearch + Springer DOI 拿到另一篇 Springer 论文
+            # (URL host 同社 link.springer.com、正文 DOI 同前缀 10.1007 → 跨社信号不触发,旧交集必放行)
+            # → 并集凭标题单信号 content-mismatch、不落盘。注:10.1007 在 publisher_adapter 注册表内,
+            # 核心拒绝后会走 publisher 兜底 —— 其 content/pdf/{期望DOI}.pdf 模板 URL 天然含期望 DOI
+            # (强正门放行属合理:出版商按 DOI serve),故用 _MapClient 让模板 URL 404、仅原候选可取,
+            # 逼兜底也拿到同一错文;子候选 source 含 "websearch" marker 同样被门拦 → 兜底不漏错论文。
+            class _QCPaperSpr:
+                doi = _SPR_DOI
+                arxiv_id = None
+                title = _QCPaper.title
+
+            _dl._extract_pdf_text_meta = lambda data, *a, **k: (None, _SPR_WRONG)
+            _spr_client = _MapClient({_SPR_URL: (good, "application/pdf")},
+                                     default=(b"<html>404 not found</html>", "text/html"))
+            with tempfile.TemporaryDirectory() as d:
+                before = set(os.listdir(d))
+                pqs, _ns, eqs = _dl.download_pdf(_QCCand("websearch", _SPR_URL),
+                                                 _QCPaperSpr(), d, _spr_client, _SelfCfgQC(), log, "sp")
+                assert pqs is None and eqs and eqs.startswith("content-mismatch("), (pqs, _ns, eqs)
+                assert "content-title-mismatch" in eqs, eqs   # 确为门①标题单信号拒(非跨社门②)
+                assert set(os.listdir(d)) == before, "同社错论文不应落盘(含 publisher 兜底路径)"
+
+            # ⑦.3 端到端 门②:websearch + 标题命中但 URL host 跨社(nature vs plos)→ content-mismatch、不落盘
+            _dl._extract_pdf_text_meta = lambda data, *a, **k: (_QCPaper.title, _MATCH_BODY)
+            with tempfile.TemporaryDirectory() as d:
+                before = set(os.listdir(d))
+                pqcx, _nx, eqcx = _dl.download_pdf(
+                    _QCCand("websearch", "https://www.nature.com/articles/s41586-1.pdf"),
+                    _QCPaper(), d, _SelfClient(good), _SelfCfgQC(), log, "wx")
+                assert pqcx is None and eqcx and eqcx.startswith("content-mismatch("), (pqcx, _nx, eqcx)
+                assert set(os.listdir(d)) == before, "URL 跨社(title 假匹配)不应落盘"
+
+            # ⑦.4 websearch + 正确论文(标题命中、URL 无冲突)→ 命中,正常落盘
+            _dl._extract_pdf_text_meta = lambda data, *a, **k: (_QCPaper.title, _MATCH_BODY)
+            with tempfile.TemporaryDirectory() as d:
+                pqc2, _n2, eqc2 = _dl.download_pdf(_QCCand("websearch", "http://x/ws_right.pdf"),
+                                                   _QCPaper(), d, _SelfClient(good), _SelfCfgQC(), log, "ws2")
+                assert pqc2 and eqc2 is None and os.path.exists(pqc2), (pqc2, eqc2)
+
+            # ⑦.5 websearch + 中间带(部分重叠、URL 无冲突)→ uncertain 放行、正常落盘(不误杀)
+            _dl._extract_pdf_text_meta = lambda data, *a, **k: (None, _PARTIAL)
+            with tempfile.TemporaryDirectory() as d:
+                pqc7, _n7, eqc7 = _dl.download_pdf(_QCCand("websearch", "http://x/ws_partial.pdf"),
+                                                   _QCPaper(), d, _SelfClient(good), _SelfCfgQC(), log, "wp")
+                assert pqc7 and eqc7 is None and os.path.exists(pqc7), (pqc7, eqc7)
+
+            # ⑦.6 websearch + 抽不出正文(扫描/图片、URL 无冲突)→ uncertain 放行(不误杀)
+            _dl._extract_pdf_text_meta = lambda data, *a, **k: (None, "")
+            with tempfile.TemporaryDirectory() as d:
+                pqc3, _n3, eqc3 = _dl.download_pdf(_QCCand("websearch", "http://x/ws_scan.pdf"),
+                                                   _QCPaper(), d, _SelfClient(good), _SelfCfgQC(), log, "ws3")
+                assert pqc3 and eqc3 is None and os.path.exists(pqc3), (pqc3, eqc3)
+
+            # ⑦.7 DOI-keyed 源(unpaywall)即便标题不符+跨社 DOI → 豁免、照常落盘(避免误杀)
+            _dl._extract_pdf_text_meta = lambda data, *a, **k: (
+                None, "atopic dermatitis 10.1038/s41586-1 entirely different topic")
+            with tempfile.TemporaryDirectory() as d:
+                pqc4, _n4, eqc4 = _dl.download_pdf(_QCCand("unpaywall", "http://x/up.pdf"),
+                                                   _QCPaper(), d, _SelfClient(good), _SelfCfgQC(), log, "up")
+                assert pqc4 and eqc4 is None and os.path.exists(pqc4), (pqc4, eqc4)
+
+            # ⑦.8 开关关(content_qc=False)→ websearch 也豁免、照常落盘(即便双门都会命中)
+            _dl._extract_pdf_text_meta = lambda data, *a, **k: (None, _JAAD)
+            with tempfile.TemporaryDirectory() as d:
+                pqc5, _n5, eqc5 = _dl.download_pdf(
+                    _QCCand("websearch", "https://www.nature.com/x.pdf"),
+                    _QCPaper(), d, _SelfClient(good), _CfgQCOff(), log, "off")
+                assert pqc5 and eqc5 is None and os.path.exists(pqc5), (pqc5, eqc5)
+
+            # ⑦.9 降级:qc_matchers 不可用(缺 pypdf/rapidfuzz/151 模块)→ 门放行,绝不误杀
+            _saved_matchers = _dl._qc_matchers
+            try:
+                _dl._qc_matchers = lambda: None
+                _dl._extract_pdf_text_meta = lambda data, *a, **k: (None, _JAAD)
+                with tempfile.TemporaryDirectory() as d:
+                    pqc6, _n6, eqc6 = _dl.download_pdf(_QCCand("websearch", "http://x/ws_degrade.pdf"),
+                                                       _QCPaper(), d, _SelfClient(good), _SelfCfgQC(), log, "dg")
+                    assert pqc6 and eqc6 is None and os.path.exists(pqc6), (pqc6, eqc6)
+            finally:
+                _dl._qc_matchers = _saved_matchers
+        finally:
+            _dl._extract_pdf_text_meta = _saved_extract
 
     print("DOWNLOAD_OK")
 

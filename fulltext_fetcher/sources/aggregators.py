@@ -172,8 +172,11 @@ class OpenAire(BaseSource):
         )
         if not data:
             return []
-        urls: List[str] = []
-        _collect_urls(data, urls)
+        # 记录级解析(2026-07 修假阳):仅收「记录 pid/DOI == 查询 DOI」的记录自身 URL。
+        # 此前对整包 JSON 递归抽 url,连 rels.rel[](引用/相关文献 = 别的论文)的 webresource
+        # 一起收 → 邻近记录的错 PDF 被当候选(实证:10.1016/j.susc.2014.02.019 与
+        # 10.1016/j.apcata.2013.07.028 都误收筑波仓库 record/38855 的 CARS 光谱 PDF)。
+        urls = _openaire_record_urls(data, paper.doi)
         out: List[PdfCandidate] = []
         seen = set()
         for u in urls:
@@ -191,8 +194,83 @@ class OpenAire(BaseSource):
         return out[:6]
 
 
+def _norm_doi(doi) -> str:
+    """归一 DOI 用于比较:去 doi.org/scheme/doi: 前缀、去空白、小写。"""
+    d = str(doi or "").strip().lower()
+    for pre in ("https://doi.org/", "http://doi.org/", "https://dx.doi.org/",
+                "http://dx.doi.org/", "doi.org/", "doi:"):
+        if d.startswith(pre):
+            d = d[len(pre):]
+            break
+    return d.strip().strip("/")
+
+
+def _as_list(v) -> list:
+    """OpenAIRE 的 XML→JSON 单元素不带数组:统一成 list 遍历。"""
+    if v is None:
+        return []
+    return v if isinstance(v, list) else [v]
+
+
+def _pid_dois(node) -> List[str]:
+    """抽取节点 pid[] 中 classid=doi 的值(已归一;容忍 dict/list、@classid/classid)。"""
+    out: List[str] = []
+    for p in _as_list((node or {}).get("pid")):
+        if not isinstance(p, dict):
+            continue
+        cid = str(p.get("@classid") or p.get("classid") or "").lower()
+        val = p.get("$") or p.get("content") or p.get("value")
+        if cid == "doi" and isinstance(val, str) and val.strip():
+            out.append(_norm_doi(val))
+    return out
+
+
+def _openaire_record_urls(data, doi) -> List[str]:
+    """从 /search/publications JSON 中按【记录级归属】抽 URL(纯函数,防御式)。
+
+    仅当记录 oaf:result 的 pid/DOI == 查询 DOI 才收该记录的 url;其中:
+    - rels 子树(引用/相关文献/项目等 = **别的论文**)整棵排除——错 PDF 假阳的根源;
+    - children(OpenAIRE dedup 同一实体的成员记录)归属有保证,收;但成员若自带
+      「明确 != 查询 DOI」的 pid → 防御性跳过(无法确证归属的不收)。
+    """
+    want = _norm_doi(doi)
+    if not want:
+        return []
+    urls: List[str] = []
+    resp = (data or {}).get("response") or {}
+    results = resp.get("results") or {}
+    recs = results.get("result") if isinstance(results, dict) else results
+    for rec in _as_list(recs):
+        if not isinstance(rec, dict):
+            continue
+        node = ((rec.get("metadata") or {}).get("oaf:entity") or {}).get("oaf:result")
+        if not isinstance(node, dict):
+            continue
+        if want not in _pid_dois(node):
+            continue  # 记录不属于查询 DOI(相似检索命中等)→ 整条不收
+        own = {k: v for k, v in node.items()
+               if str(k).lower() not in ("rels", "children")}
+        _collect_urls(own, urls)
+        children = node.get("children")
+        if isinstance(children, dict):
+            rest = {k: v for k, v in children.items() if str(k).lower() != "result"}
+            _collect_urls(rest, urls)
+            for child in _as_list(children.get("result")):
+                if not isinstance(child, dict):
+                    continue
+                child_dois = _pid_dois(child)
+                if child_dois and want not in child_dois:
+                    continue  # dedup 成员声称别的 DOI → 归属存疑,不收
+                _collect_urls(child, urls)
+    return urls
+
+
 def _collect_urls(node, acc: List[str], depth: int = 0) -> None:
-    """在 OpenAIRE 深层嵌套 JSON 中递归提取 webresource/url 链接(防御式)。"""
+    """在 OpenAIRE 深层嵌套 JSON 中递归提取 webresource/url 链接(防御式)。
+
+    注意:本函数只做「形态抽取」,不判归属;调用方须先按记录级归属裁剪节点
+    (见 _openaire_record_urls),绝不可再对整包响应调用(会把 rels 相关文献一起收)。
+    """
     if depth > 12 or len(acc) > 30:
         return
     if isinstance(node, dict):
@@ -240,4 +318,101 @@ if __name__ == "__main__":  # 纯函数 selftest(不联网): python -m fulltext_
     #   (Core 68 / OpenAlex locations 74 / S2 76 / Unpaywall oa_locations 82),
     #   确保 --no-download 的全局 top 不被 Crossref 兜底链抢占。
     assert f({"URL": "https://oa.org/g.pdf", "content-type": "application/pdf"})[1] < 68
+
+    # ══ OpenAIRE 记录级归属解析(2026-07 修 rels 邻近文献假阳)══════════════════
+    # 基础纯函数
+    assert _norm_doi("https://doi.org/10.1016/J.SUSC.2014.02.019") == "10.1016/j.susc.2014.02.019"
+    assert _norm_doi("doi:10.1/X ") == "10.1/x" and _norm_doi(None) == ""
+    assert _as_list(None) == [] and _as_list("a") == ["a"] and _as_list([1, 2]) == [1, 2]
+    assert _pid_dois({"pid": {"@classid": "doi", "$": "10.1/A"}}) == ["10.1/a"]
+    assert _pid_dois({"pid": [{"@classid": "pmid", "$": "123"},
+                              {"@classid": "doi", "$": "10.2/B"}]}) == ["10.2/b"]
+    assert _pid_dois({}) == [] and _pid_dois({"pid": "junk"}) == []
+
+    def _rec(pid_dois, own_instances=None, rels=None, children=None):
+        """构造一条最小 /search/publications 记录(复刻实网 oaf:entity 结构)。"""
+        node = {"pid": [{"@classid": "doi", "$": d} for d in pid_dois]}
+        if own_instances:
+            node["instance"] = own_instances
+        if rels is not None:
+            node["rels"] = rels
+        if children is not None:
+            node["children"] = children
+        return {"metadata": {"oaf:entity": {"oaf:result": node}}}
+
+    def _resp(*recs):
+        return {"response": {"results": {"result": list(recs)}}}
+
+    _WANT = "10.1016/j.susc.2014.02.019"
+    _BAD_38855 = "https://tsukuba.repo.nii.ac.jp/record/38855/files/CPL_655%EF%BC%8F656.pdf"
+    # 实证根因复刻:错 PDF 挂在 rels.rel[].instance.fulltext.$(引用/相关文献=别的论文)
+    _RELS_WITH_38855 = {"rel": [
+        {"instance": {"fulltext": {"$": _BAD_38855}}},
+        {"instance": [{"webresource": {"url": {"$": "https://doi.org/10.1016/j.molstruc.2009.10.026"}},
+                       "url": {"$": "https://digital.csic.es/bitstream/10261/91676/1/x.pdf"}}]},
+    ]}
+
+    class _FakeClient:
+        def __init__(self, data): self._data = data
+        def get_json(self, url, **kw): return self._data
+
+    class _OACtx:
+        def __init__(self, data):
+            self.client = _FakeClient(data)
+            self.cfg = None; self.log = None; self.events = None
+
+    # ① 实证场景1(10.1016/j.susc.2014.02.019):记录归属正确但自身无 OA 全文,
+    #    rels 里挂着 38855 错 PDF → 修复后必须 0 候选(旧代码在此误收 38855)
+    d1 = _resp(_rec([_WANT], own_instances=[
+        {"webresource": {"url": {"$": "https://doi.org/" + _WANT}}}], rels=_RELS_WITH_38855))
+    u1 = _openaire_record_urls(d1, _WANT)
+    assert all("38855" not in u and "csic.es" not in u for u in u1), u1
+    c1 = OpenAire().find_candidates(Paper(doi=_WANT), _OACtx(d1))
+    assert c1 == [], f"susc 记录无 OA 全文,rels 错 PDF 不得成为候选: {[c.url for c in c1]}"
+
+    # ② 实证场景2(10.1016/j.apcata.2013.07.028):children dedup 成员(无 pid)的
+    #    handle URL 归属可信、可收;rels 38855 仍必须拒收
+    _WANT2 = "10.1016/j.apcata.2013.07.028"
+    d2 = _resp(_rec([_WANT2], rels=_RELS_WITH_38855, children={"result": [
+        {"instance": {"url": {"$": "http://hdl.handle.net/11336/2054"},
+                      "webresource": {"url": {"$": "http://hdl.handle.net/11336/2054"}}}}]}))
+    u2 = _openaire_record_urls(d2, _WANT2)
+    assert "http://hdl.handle.net/11336/2054" in u2 and all("38855" not in u for u in u2), u2
+    assert OpenAire().find_candidates(Paper(doi=_WANT2), _OACtx(d2)) == []  # handle 不像 PDF→不产噪声候选
+
+    # ③ 正向召回不破坏:记录 pid==查询 DOI 时,记录自身 instance 的 PDF/landing 仍能收
+    d3 = _resp(_rec([_WANT], own_instances=[
+        {"webresource": {"url": {"$": "https://repo.univ.edu/oa/paper.pdf"}}},
+        {"url": {"$": "https://arxiv.org/abs/1401.0001"}}], rels=_RELS_WITH_38855))
+    c3 = OpenAire().find_candidates(Paper(doi=_WANT), _OACtx(d3))
+    assert [c.url for c in c3 if c.kind == "pdf"] == ["https://repo.univ.edu/oa/paper.pdf"], c3
+    assert any(c.url == "https://arxiv.org/abs/1401.0001" and c.kind == "landing" for c in c3), c3
+    assert all("38855" not in c.url for c in c3), c3
+    assert all(c.source == "openaire" for c in c3)
+
+    # ④ 相似检索命中(记录 pid != 查询 DOI)→ 整条不收,即便其 instance 有 PDF
+    d4 = _resp(_rec(["10.9999/other.paper"], own_instances=[
+        {"webresource": {"url": {"$": "https://repo.other.org/wrong.pdf"}}}]))
+    assert _openaire_record_urls(d4, _WANT) == []
+    assert OpenAire().find_candidates(Paper(doi=_WANT), _OACtx(d4)) == []
+
+    # ⑤ children 成员自带「明确 != 查询 DOI」的 pid → 该成员防御性跳过;无 pid 成员照收
+    d5 = _resp(_rec([_WANT], children={"result": [
+        {"pid": {"@classid": "doi", "$": "10.8888/stranger"},
+         "instance": {"url": {"$": "https://repo.x.org/stranger.pdf"}}},
+        {"instance": {"url": {"$": "https://repo.y.edu/mine.pdf"}}}]}))
+    u5 = _openaire_record_urls(d5, _WANT)
+    assert "https://repo.y.edu/mine.pdf" in u5 and \
+        all("stranger" not in u for u in u5), u5
+
+    # ⑥ 防御式健壮性:空/畸形响应、单记录不带数组、大小写 DOI 均不抛且行为正确
+    assert _openaire_record_urls(None, _WANT) == []
+    assert _openaire_record_urls({}, _WANT) == []
+    assert _openaire_record_urls({"response": {"results": None}}, _WANT) == []
+    assert _openaire_record_urls(_resp("junk", None), _WANT) == []
+    d6 = {"response": {"results": {"result": _rec([_WANT.upper()], own_instances=[
+        {"url": {"$": "https://repo.z.org/ok.pdf"}}])}}}   # 单记录 dict(不带数组)+ 大写 DOI
+    assert _openaire_record_urls(d6, _WANT) == ["https://repo.z.org/ok.pdf"]
+    assert _openaire_record_urls(d6, "") == [] and _openaire_record_urls(d6, None) == []
+
     print("AGGREGATORS_OK")

@@ -143,6 +143,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--institutional", action="store_true",
                    help="启用机构订阅直链源 publisher_direct(对订阅/混合出版商也构造 PDF 直链)。"
                         "仅供拥有合法机构订阅、对内容有访问权者使用;无订阅时直链会 401/403 被 %PDF 校验过滤")
+    # 机构订阅三件套(默认全空 → 行为与未启用逐字节一致;详见 机构订阅集成设计.md)。
+    # Cookie/前缀建议走环境变量而非命令行明文,避免留在 shell 历史里。
+    p.add_argument("--ezproxy-prefix", default=os.environ.get("EZPROXY_PREFIX"),
+                   help="EZproxy 接入点:前缀式如 \"https://login.ezproxy.uni.edu/login?url=\";"
+                        "或主机名改写式代理域(裸域名)如 \"ezproxy.uni.edu\"(自动识别两种形式;"
+                        "默认取环境变量 EZPROXY_PREFIX)")
+    p.add_argument("--institution-cookie", default=os.environ.get("INSTITUTION_COOKIE"),
+                   help="机构 SSO/EZproxy 登录后的会话 Cookie 串(\"k1=v1; k2=v2\");"
+                        "强烈建议用环境变量 INSTITUTION_COOKIE 传入,不留 shell 历史;绝不入日志/产物")
+    p.add_argument("--institution-domain", action="append", default=None,
+                   metavar="DOMAIN",
+                   help="仅对这些出版商域名启用机构通道(可重复给出,或单值内用逗号分隔,"
+                        "如 sciencedirect.com,onlinelibrary.wiley.com);不给=不改写任何域名")
     p.add_argument("--enable-scihub", action="store_true",
                    help="启用 Sci-Hub 兜底(注意:合规风险,默认关闭)")
     p.add_argument("--scihub-mirror", default="https://sci-hub.se")
@@ -178,6 +191,10 @@ def main(argv: List[str] | None = None) -> int:
         resume=not args.no_resume,
         retry_failed=args.retry_failed,
         institutional=args.institutional,
+        ezproxy_prefix=(args.ezproxy_prefix or None),
+        institution_cookie=(args.institution_cookie or None),
+        institution_domains=[d.strip() for raw in (args.institution_domain or [])
+                             for d in raw.split(",") if d.strip()],
         enable_scihub=args.enable_scihub,
         scihub_mirror=args.scihub_mirror,
         log_level=args.log_level,
@@ -277,6 +294,23 @@ def _selftest() -> int:
         # ④ _extract_from_rows 直测:表头大小写 / 空格不敏感,doi 优先、回退 title
         rows = [[" DOI ", "Title"], ["10.3000/p", "T"], ["", "Only Title"]]
         assert _extract_from_rows(rows) == ["10.3000/p", "Only Title"], _extract_from_rows(rows)
+
+    # ⑤ 机构订阅参数解析(离线,不跑主流程):--institution-domain 可重复 + 逗号分隔混用;
+    #    默认(不给)→ None;Cookie/前缀默认取环境变量。此处只验证 argparse 层与拆分逻辑。
+    parser = build_parser()
+    a = parser.parse_args(["10.1/x", "--institutional",
+                           "--ezproxy-prefix", "https://login.ezproxy.uni.edu/login?url=",
+                           "--institution-cookie", "k1=v1; k2=v2",
+                           "--institution-domain", "sciencedirect.com,pubs.acs.org",
+                           "--institution-domain", "onlinelibrary.wiley.com"])
+    assert a.institutional and a.ezproxy_prefix.endswith("login?url="), a.ezproxy_prefix
+    assert a.institution_cookie == "k1=v1; k2=v2"
+    domains = [d.strip() for raw in (a.institution_domain or [])
+               for d in raw.split(",") if d.strip()]
+    assert domains == ["sciencedirect.com", "pubs.acs.org", "onlinelibrary.wiley.com"], domains
+    a2 = parser.parse_args(["10.1/x"])
+    assert a2.institution_domain is None      # 默认不给 → None → Config 得到空列表
+    assert not a2.institutional
 
     print("CLI_OK")
     return 0

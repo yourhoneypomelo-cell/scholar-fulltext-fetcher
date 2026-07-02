@@ -60,6 +60,17 @@ class Config:
     min_pdf_bytes: int = 1024
     max_pdf_bytes: int = 80 * 1024 * 1024  # 单文件上限 80MB,防异常大体
 
+    # 内容 QC 门(P0,默认开):对**非 DOI-keyed 来源**(websearch/wayback/browser_search 及经 +landing
+    # 解析者)在记 success 前核对"是不是这篇",拦截"下到错论文"的系统性假阳。**双门 union**(总指挥经
+    # 审计逐条交叉验证校正:标题法 mismatch 属实、非过判,350 条真错论文 URL 法看不到,故不能只取交集):
+    # 记 success 需"内容标题匹配 AND URL-DOI 一致",**任一为错即判失败**:① 能抽出正文且标题分<50(明确
+    # 他题)→ error=content-mismatch;② URL/正文首部佐证异出版商或异 DOI(即便标题模糊命中,专堵 title
+    # 假匹配如 frontiersin/未来年份 DOI)→ error=content-mismatch;均不落盘。期望 DOI 出现在正文/URL→放行。
+    # **uncertain(中间带)/scanned(抽不出正文)/无锚点 → 放行打标 qc_uncertain,绝不误杀 undecidable**。
+    # DOI-keyed 源(unpaywall/openalex/publisher_oa/crossref/S2/snapshot…)一律豁免。复用 tools/qc_content_match
+    # (pypdf 抽首2页文本+元数据 title × rapidfuzz 模糊);缺 pypdf/rapidfuzz/模块自动降级放行。置 False→整体回退。
+    content_qc: bool = True
+
     # 行为开关
     oa_only: bool = False        # 仅尝试开放获取(跳过低置信落地页)
     no_download: bool = False    # 只定位不下载(快速验证源命中)
