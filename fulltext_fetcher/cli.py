@@ -159,6 +159,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--enable-scihub", action="store_true",
                    help="启用 Sci-Hub 兜底(注意:合规风险,默认关闭)")
     p.add_argument("--scihub-mirror", default="https://sci-hub.se")
+    # ── 路线B 浏览器内直下 PDF(破 JA3 绑定型强 CF / Akamai;可选、默认 off)──
+    p.add_argument("--route-b", choices=["off", "cf-only", "all"], default="off",
+                   help="路线B 浏览器内直下 PDF:off(默认,全关)| cf-only(仅对 RSC/ACS/Wiley/"
+                        "ScienceDirect 等 JA3 绑定型强 CF 站,浏览器内抓字节)| all(再加有头浏览器过 "
+                        "Akamai 下载,治 MDPI)。需装 nodriver + 有头显示环境;已内建单头串行 + 落盘前"
+                        "强制内容 QC。绝不默认 all。")
+    p.add_argument("--browser-headless", action="store_true",
+                   help="路线B 浏览器无头运行(默认有头:过 CF/Akamai 通过率更高;无头需 xvfb 等虚拟显示)")
+    p.add_argument("--browser-pdf-wait", type=float, default=13.0,
+                   help="路线B 有头浏览器过验证/渲染的等待秒(默认 13;--route-b all 时生效)")
     p.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     return p
 
@@ -197,8 +207,12 @@ def main(argv: List[str] | None = None) -> int:
                              for d in raw.split(",") if d.strip()],
         enable_scihub=args.enable_scihub,
         scihub_mirror=args.scihub_mirror,
+        route_b=args.route_b,
+        browser_pdf_headless=args.browser_headless,
+        browser_pdf_wait=args.browser_pdf_wait,
         log_level=args.log_level,
     )
+    cfg.apply_route_b()          # 据 --route-b 派生 browser_capture / browser_pdf_download(单一真源)
     if args.sources:
         cfg.sources = [s.strip() for s in args.sources.split(",") if s.strip()]
     # 机构模式:把 publisher_direct 接入源顺序(置于免费 OA 源之后、兜底 websearch 之前);
@@ -217,6 +231,10 @@ def main(argv: List[str] | None = None) -> int:
                          "对内容有访问权者使用;无订阅的直链会 401/403 被 %PDF 校验过滤。")
     if cfg.enable_scihub:
         pipe.log.warning("注意:已启用 Sci-Hub 兜底,存在合规/法律风险,使用者自负。")
+    if cfg.browser_capture or cfg.browser_pdf_download:
+        pipe.log.warning(
+            "已启用路线B 浏览器内直下(--route-b=%s):需 nodriver + 有头显示环境,单头串行(全组共一机);"
+            "缺依赖/无显示时优雅 no-op。仅对已合法获取、有权访问的 OA/订阅内容使用。", args.route_b)
 
     summary = pipe.run(inputs)
 
@@ -311,6 +329,21 @@ def _selftest() -> int:
     a2 = parser.parse_args(["10.1/x"])
     assert a2.institution_domain is None      # 默认不给 → None → Config 得到空列表
     assert not a2.institutional
+
+    # ⑥ 路线B --route-b 三档 → Config.apply_route_b() 派生 browser_capture/browser_pdf_download
+    assert parser.parse_args(["10.1/x"]).route_b == "off"           # 默认 off
+    from .config import Config as _Cfg
+    _off = _Cfg(route_b="off"); _off.apply_route_b()
+    assert _off.browser_capture is False and _off.browser_pdf_download is False, vars(_off)
+    _cf = _Cfg(route_b="cf-only"); _cf.apply_route_b()
+    assert _cf.browser_capture is True and _cf.browser_pdf_download is False, vars(_cf)
+    _all = _Cfg(route_b="all"); _all.apply_route_b()
+    assert _all.browser_capture is True and _all.browser_pdf_download is True, vars(_all)
+    _bad = _Cfg(route_b="bogus"); _bad.apply_route_b()              # 未知值 → 按 off,绝不误开
+    assert _bad.browser_capture is False and _bad.browser_pdf_download is False, vars(_bad)
+    a3 = parser.parse_args(["10.1/x", "--route-b", "all", "--browser-headless",
+                            "--browser-pdf-wait", "20"])
+    assert a3.route_b == "all" and a3.browser_headless is True and a3.browser_pdf_wait == 20.0, vars(a3)
 
     print("CLI_OK")
     return 0

@@ -68,8 +68,32 @@ class Config:
     # 假匹配如 frontiersin/未来年份 DOI)→ error=content-mismatch;均不落盘。期望 DOI 出现在正文/URL→放行。
     # **uncertain(中间带)/scanned(抽不出正文)/无锚点 → 放行打标 qc_uncertain,绝不误杀 undecidable**。
     # DOI-keyed 源(unpaywall/openalex/publisher_oa/crossref/S2/snapshot…)一律豁免。复用 tools/qc_content_match
-    # (pypdf 抽首2页文本+元数据 title × rapidfuzz 模糊);缺 pypdf/rapidfuzz/模块自动降级放行。置 False→整体回退。
+    # (pypdf 抽首2页文本+元数据 title × rapidfuzz 模糊)。**缺依赖行为见下方 content_qc_require_deps
+    # (默认 fail-closed:需过门却缺 pypdf/模块→拒收不落盘,绝不静默放行)**。置 False→整体回退。
     content_qc: bool = True
+
+    # ── 内容 QC 门·非正文版式增强(P0,默认开;可独立于 content_qc 回退)──────────────────
+    # 背景(recover_b4_cf 实锤,见《选型2026-QC并集门增强建议-recover_b4_cf假阳-173.md》):既有并集门
+    # (门①标题 + 门②跨社/异 DOI)对"同社同 DOI 却拿到的是 Supporting Information / citation-report /
+    # poster / 卷期目录(TOC)"这类【非正文版式】零免疫——首页印着正确标题+DOI,却不是正文 PDF。本增强补一
+    # 类"非正文硬信号":命中即【降级为 uncertain】(默认;照常落盘但标 qc_uncertain、不再虚增 match),
+    # 靠首页关键词 + 页数/正文长度阈区分,真正文(含末尾 SI 章节)不误杀。置 False → 该增强整体回退,
+    # 且 acs-authorchoice 强制过门亦随之关闭。
+    content_qc_non_article: bool = True
+    # 非正文命中后的判定档:默认 False → uncertain(降级放行、照常落盘打标 qc_uncertain);置 True →
+    # mismatch(硬拒不落盘,对齐 173 §六 checklist 的 verdict=mismatch)。仅在 content_qc_non_article 开启时生效。
+    content_qc_non_article_hard_reject: bool = False
+
+    # ── 内容 QC 门·依赖守卫 fail-closed(P0,默认开)──────────────────────────────
+    # 背景(总指挥 item3):QC 复用 pypdf(抽首2页正文+元数据 title)与 rapidfuzz(标题模糊匹配)。旧行为
+    # 是二者缺失即 try/except 静默降级放行 → QC 变"盲判",错论文照记 success = 假阳回归。本守卫改为
+    # **fail-closed**:当 content_qc 启用、且本条【需过门】(非 DOI-keyed 源 或 route-B force),但关键
+    # 依赖缺失(tools.qc_content_match 不可导入 / pypdf 抽不出正文)时,给强告警并【拒收不落盘】
+    # (error=content-qc-deps-missing),绝不静默 PASS。
+    # 注:rapidfuzz 缺失有 difflib 兜底、QC 仍可用(仅标题模糊精度略降)→ 只记一次软告警,**不**触发
+    # fail-closed。置 False → 回退旧「缺依赖=降级放行·打标 qc_uncertain」(仍非静默:强告警+记事件),
+    # 供无 pypdf 环境或需最大召回时用。装齐依赖:pip install fulltext_fetcher[qc]。
+    content_qc_require_deps: bool = True
 
     # 行为开关
     oa_only: bool = False        # 仅尝试开放获取(跳过低置信落地页)
@@ -88,6 +112,22 @@ class Config:
     flaresolverr_url: Optional[str] = None      # 端点,如 "http://localhost:8191"(留空→用 env 或默认)
     flaresolverr_timeout_ms: int = 60000        # 浏览器侧解质询最大等待(毫秒)
 
+    # ── 路线B「浏览器内直下 PDF」(可选、默认全关)──────────────────────────────
+    # 破 JA3 绑定型强 CF(RSC/ScienceDirect/ACS/Wiley:curl_cffi 回放仍 403)与 Akamai(MDPI):在【同一
+    # 浏览器会话】内经 CDP 抓 PDF 字节 / 下载,TLS/JA3 天然一致。三档(``route_b``):
+    #   off     :全关(默认,零副作用、零额外依赖);
+    #   cf-only :仅对 JA3 绑定型强 CF 站走浏览器内抓字节(``browser_capture``);
+    #   all     :再加有头浏览器过 Akamai 经 CDP 下载(``browser_pdf_download``,治 MDPI 等)。
+    # **绝不默认 all**。全组共一机单头浏览器,route-B 已内建 concurrency=1 硬护栏(BoundedSemaphore(1) +
+    # out/.route_b.lock)与【落盘前强制内容 QC】。需装可选依赖 nodriver + 有头显示环境;缺则优雅 no-op。
+    # ``browser_capture`` / ``browser_pdf_download`` 由 ``apply_route_b()`` 据 ``route_b`` 派生(单一真源);
+    # 也兼容环境变量 ``FTF_BROWSER_CAPTURE=1`` 单独启用 cf-only 抓字节(见 download._browser_capture_enabled)。
+    route_b: str = "off"                        # off | cf-only | all(CLI: --route-b)
+    browser_capture: bool = False               # 强 CF 站浏览器内抓字节(由 route_b 派生;env 亦可单独启用)
+    browser_pdf_download: bool = False          # 有头浏览器过 Akamai 经 CDP 下载(由 route_b=all 派生)
+    browser_pdf_headless: bool = False          # 浏览器是否无头(默认 False=有头:过 CF/Akamai 通过率更高)
+    browser_pdf_wait: float = 13.0              # 有头浏览器过验证/渲染等待秒(route_b=all 时生效)
+
     # ── 机构订阅 / EZproxy 接入(可选,默认全部关闭;对开放 API 正门零影响)──
     # 合规声明:以下选项仅供拥有【合法机构订阅】的用户、对其【有权访问】的内容使用,
     # 用于在已获授权前提下经机构 EZproxy/SSO 正常取用全文;不得用于绕过付费墙或任何访问授权。
@@ -104,6 +144,17 @@ class Config:
 
     log_level: str = "INFO"
     user_agent: str = "fulltext_fetcher/1.0 (https://example.org; mailto:{email})"
+
+    def apply_route_b(self) -> None:
+        """据 ``route_b`` 模式派生 ``browser_capture`` / ``browser_pdf_download``(单一真源)。
+
+        off → 两者皆 False;cf-only → 仅 browser_capture;all → 两者皆 True。未知值一律按 off 处理
+        (**绝不因误配而默认开**)。CLI 构造 Config 后调用一次;直接构造 Config 的调用方(含 selftest)
+        若显式设了 browser_* 而不调用本方法,则以显式值为准(向后兼容)。
+        """
+        mode = (self.route_b or "off").strip().lower().replace("_", "-")
+        self.browser_capture = mode in ("cf-only", "all")
+        self.browser_pdf_download = mode == "all"
 
     def ua(self) -> str:
         return self.user_agent.replace("{email}", self.email)

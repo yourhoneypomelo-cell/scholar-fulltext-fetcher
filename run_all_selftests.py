@@ -92,6 +92,12 @@ CHECKS = [
     ("browser_search",     ["fulltext_fetcher.browser_search"],                                           [], "BROWSER_SEARCH_OK"),
     ("flaresolverr",       ["fulltext_fetcher.flaresolverr"],                                             [], "FLARESOLVERR_OK"),
     ("bench_free_methods", ["fulltext_fetcher.bench_free_methods", "bench_free_methods"],                 [], "BENCH_OK"),
+
+    # —— 北极星主流程 & 覆盖率构建(仓根/tools 脚本,非 fulltext_fetcher 包内;均离线 --selftest)——
+    # 各带离线自检:run_all.py --selftest → RUN_ALL_OK;tools/build_coverage.py --selftest → COVERAGE_OK。
+    # 以子进程 `python -m <mod>` 运行(与 ONLINE_CHECKS 里 tools.flaresolverr_nodriver 同款),绝不编辑被测脚本。
+    ("run_all",            ["run_all"],                                                                   ["--selftest"], "RUN_ALL_OK"),
+    ("build_coverage",     ["tools.build_coverage"],                                                      ["--selftest"], "COVERAGE_OK"),
 ]
 
 # —— 可选「联网」自检(默认 SKIP;需真实浏览器 + 出网)——

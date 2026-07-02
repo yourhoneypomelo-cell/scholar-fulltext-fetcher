@@ -353,6 +353,10 @@ class Pipeline:
             return True
         if getattr(cfg, "render_fallback", False) or getattr(cfg, "browser_pdf_download", False):
             return True
+        if getattr(cfg, "browser_capture", False):
+            return True
+        if os.environ.get("FTF_BROWSER_CAPTURE", "").strip().lower() in ("1", "true", "yes"):
+            return True
         try:
             if any(getattr(s, "name", "") == "browser_search" for s in self.sources):
                 return True

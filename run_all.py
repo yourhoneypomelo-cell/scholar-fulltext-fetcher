@@ -27,6 +27,7 @@
   python run_all.py -f inputs.txt --email you@uni.edu -o out/run_all
   python run_all.py "10.1371/journal.pone.0000217" "1706.03762" "Attention is all you need" -o out/run_demo
   python run_all.py -f inputs.txt --no-resume            # 不做跨批已covered剔除(强制全跑)
+  python run_all.py -f inputs.txt --route-b cf-only      # 一键路径启用路线B(JA3型强CF站浏览器内抓字节;需 nodriver+有头)
   python run_all.py --selftest                            # 离线自检(不联网)→ RUN_ALL_OK
 
 护栏:新文件、不改核心码;每次用独立 -o(pipeline 的 out_dir 写锁会阻止并发写同一目录)。
@@ -165,7 +166,7 @@ def _print_page(payload: Dict[str, Any]) -> None:
     print(line + "\n")
 
 
-def run(argv: Optional[List[str]] = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="run_all",
         description="一键编排:输入清单→跨批去重/续跑→下载→coverage/still_missing→一页式总结(包装 Pipeline,不改核心码)。",
@@ -191,8 +192,24 @@ def run(argv: Optional[List[str]] = None) -> int:
                     help="QC 并集黑名单 CSV(默认 <coverage-root>/qc_merge_union_wrong.csv)")
     ap.add_argument("--no-download", action="store_true", help="只定位不下载(快速验证源命中)")
     ap.add_argument("--sources", help="逗号分隔源及顺序(默认全部)")
+    # ── 路线B 浏览器内直下 PDF(破 JA3 绑定型强 CF / Akamai;可选、默认 off)──
+    # 补断点①:此前 run_all 一键路径不透传 route-b,JA3 型强 CF 站(RSC/ACS/Wiley/ScienceDirect/MDPI)
+    # 在一键流下恒 miss。这里把核心 CLI 已有的三档开关透传到 Config.apply_route_b(),口径与
+    # `python -m fulltext_fetcher --route-b ...` 完全一致(见 fulltext_fetcher/cli.py)。
+    ap.add_argument("--route-b", choices=["off", "cf-only", "all"], default="off",
+                    help="路线B 浏览器内直下 PDF:off(默认,全关)| cf-only(仅 RSC/ACS/Wiley/"
+                         "ScienceDirect 等 JA3 绑定型强 CF 站,浏览器内抓字节)| all(再加有头浏览器过 "
+                         "Akamai 下载,治 MDPI)。需装 nodriver + 有头显示环境;单头串行 + 落盘前强制内容 QC。")
+    ap.add_argument("--browser-headless", action="store_true",
+                    help="路线B 浏览器无头运行(默认有头:过 CF/Akamai 通过率更高;无头需 xvfb 等虚拟显示)")
+    ap.add_argument("--browser-pdf-wait", type=float, default=13.0,
+                    help="路线B 有头浏览器过验证/渲染的等待秒(默认 13;--route-b all 时生效)")
     ap.add_argument("--selftest", action="store_true", help="离线自检后退出")
-    args = ap.parse_args(argv)
+    return ap
+
+
+def run(argv: Optional[List[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
 
     bc = _load_build_coverage()
     if args.selftest:
@@ -247,9 +264,16 @@ def run(argv: Optional[List[str]] = None) -> int:
         timeout=args.timeout,
         resume=args.resume,
         no_download=args.no_download,
+        route_b=args.route_b,
+        browser_pdf_headless=args.browser_headless,
+        browser_pdf_wait=args.browser_pdf_wait,
     )
+    cfg.apply_route_b()      # 据 --route-b 派生 browser_capture / browser_pdf_download(单一真源,同核心 CLI)
     if args.sources:
         cfg.sources = [s.strip() for s in args.sources.split(",") if s.strip()]
+    if cfg.browser_capture or cfg.browser_pdf_download:
+        print("run_all: 已启用路线B 浏览器内直下(--route-b=%s):需 nodriver + 有头显示环境,单头串行(全组共一机);"
+              "缺依赖/无显示时优雅 no-op。仅对已合法获取、有权访问的 OA/订阅内容使用。" % args.route_b)
 
     run_summary: Dict[str, Any] = {
         "processed": 0, "success": 0, "miss": 0, "success_rate": 0.0,
@@ -341,6 +365,24 @@ def _selftest(bc: Any) -> int:
     assert dedup_inputs([], bc) == ([], 0)
     t2, s2 = filter_already_covered(["10.9/z"], set(), bc)
     assert t2 == ["10.9/z"] and s2 == [], (t2, s2)
+
+    # ⑤ 路线B 参数透传(补断点①):--route-b 三档 → Config.apply_route_b() 派生 browser_capture/
+    #    browser_pdf_download,口径须与核心 CLI 完全一致;默认 off 时两者皆 False(零副作用)。
+    from fulltext_fetcher.config import Config as _Cfg
+    parser = build_parser()
+    a_def = parser.parse_args(["10.1/x"])
+    assert a_def.route_b == "off" and a_def.browser_headless is False and a_def.browser_pdf_wait == 13.0, vars(a_def)
+    _off = _Cfg(route_b=a_def.route_b); _off.apply_route_b()
+    assert _off.browser_capture is False and _off.browser_pdf_download is False, vars(_off)
+    a_cf = parser.parse_args(["10.1/x", "--route-b", "cf-only"])
+    _cf = _Cfg(route_b=a_cf.route_b); _cf.apply_route_b()
+    assert _cf.browser_capture is True and _cf.browser_pdf_download is False, vars(_cf)
+    a_all = parser.parse_args(["10.1/x", "--route-b", "all", "--browser-headless", "--browser-pdf-wait", "20"])
+    assert a_all.browser_headless is True and a_all.browser_pdf_wait == 20.0, vars(a_all)
+    _all = _Cfg(route_b=a_all.route_b, browser_pdf_headless=a_all.browser_headless,
+                browser_pdf_wait=a_all.browser_pdf_wait); _all.apply_route_b()
+    assert _all.browser_capture is True and _all.browser_pdf_download is True, vars(_all)
+    assert _all.browser_pdf_headless is True and _all.browser_pdf_wait == 20.0, vars(_all)
 
     print("RUN_ALL_OK")
     return 0

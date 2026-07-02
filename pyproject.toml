@@ -29,6 +29,11 @@ dependencies = [
 xlsx = ["openpyxl"]
 # 渲染型落地页取 PDF 的可选增强(无则回退纯 HTTP 抓取)
 render = ["playwright"]
+# 内容 QC 门(download._content_qc_gate 复用 tools/qc_content_match):pypdf 抽 PDF 首2页正文+元数据
+# title,rapidfuzz 做标题模糊匹配,拦"下到错论文"的系统性假阳。**默认 fail-closed**:需过门却缺 pypdf
+# → 拒收不落盘(见 config.content_qc_require_deps),故这两者是内容 QC 的关键依赖,非纯装饰。
+# 下限取当前已验证版本(pypdf 3.17.4 / rapidfuzz 3.14.5)对应的稳妥下界;安装:pip install fulltext_fetcher[qc]。
+qc = ["pypdf>=3.17", "rapidfuzz>=3.0"]
 
 [project.scripts]
 # setuptools 生成的入口会执行 sys.exit(main());cli.main 返回 int 即作退出码,无需改 cli.py。

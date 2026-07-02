@@ -48,9 +48,15 @@ import os
 import sys
 import time
 from collections import Counter
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 OUT_DIR = "out"
+
+# 「嵌套扫描」默认剔除的测试/演示夹具:这些目录(run_all_demo_*/smoke170* 的 fetch/)是冒烟/演示产出,
+# 会引入**语料外 DOI**(如 demo 的 arXiv:1706.03762「Attention is all you need」),纳入会污染
+# 999 条权威语料的 total/success 口径。仅作用于二级+ 目录的顶层名匹配;一级目录一律照旧收录,
+# 以严格保持既有 999/371 审计基线不漂移(含名字里恰好含 smoke 的一级 recover_b4_cf_smoke_179)。
+_NESTED_EXCLUDE_SUBSTR = ("demo", "smoke")
 
 # 与 tools/aggregate_batch4.py / tools/dedup_recover_input.py / resolve.py 保持一致的 DOI 前缀清单。
 _DOI_PREFIXES = (
@@ -135,6 +141,37 @@ def read_qc_dois(path: str) -> Set[str]:
     return out
 
 
+def read_doi_list(path: Optional[str]) -> Set[str]:
+    """稳健读取「一行一 DOI」清单(供 --qc-allow / --qc-extra-reject 消费下游内容QC 成员的产物)。
+
+    兼容三种常见格式:纯 DOI 每行一条、TSV(doi\\t类型,如 -145 的 rerun_acs_144_deduct_dois_145.txt)、
+    CSV(doi,...)。规则:跳过空行与 # 注释行,取每行**首个** tab/逗号/空白 分隔的 token 作 DOI,
+    经 norm_doi 归一。文件缺失/为空→空集。与 read_qc_dois(需 doi 表头列)互补:此函数不要求表头。"""
+    out: Set[str] = set()
+    if not path or not os.path.isfile(path):
+        return out
+    with open(path, "r", encoding="utf-8-sig") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            tok = line.replace("\t", " ").replace(",", " ").split()
+            if not tok:
+                continue
+            d = norm_doi({"doi": tok[0]})
+            if d:
+                out.add(d)
+    return out
+
+
+def read_doi_lists(paths: Optional[Iterable[str]]) -> Set[str]:
+    """合并多个 DOI 清单文件为一个集合(任一缺失优雅跳过)。"""
+    out: Set[str] = set()
+    for p in (paths or []):
+        out |= read_doi_list(p)
+    return out
+
+
 def read_qc_manifest(path: str) -> Tuple[Set[str], Set[str]]:
     """读取 cleanup(165)产的物理归置清单 out/qc_rejected_manifest.csv,返回 (hard, soft) 规范化 DOI 集。
 
@@ -197,36 +234,99 @@ def is_core_batch(name: str) -> bool:
     return name in ("batch6", "batch7") or name.startswith("batch4_p")
 
 
-def list_batch_dirs(out_root: str) -> List[str]:
-    """out_root 下含 metadata.jsonl 的一级子目录名,按 metadata.jsonl 的 mtime 升序
-    (旧→新),使「miss 取末次」= 最近一次尝试的原因。"""
+def list_batch_dirs(out_root: str,
+                    include_nested: bool = False,
+                    exclude_substrings: Tuple[str, ...] = _NESTED_EXCLUDE_SUBSTR,
+                    extra_dirs: Optional[Iterable[str]] = None) -> List[str]:
+    """out_root 下含 metadata.jsonl 的目录(相对 out_root、正斜杠归一),按 metadata.jsonl 的
+    mtime 升序(旧→新),使「miss 取末次」= 最近一次尝试的原因。
+
+    历史 bug:只扫一级 out/<dir>/metadata.jsonl,漏了 run_all 自带的**二级**产出
+    out/<dir>/fetch/metadata.jsonl(rerun_*/recover_* 多为此形,甚至 rerun_cf_savable_140/<sub>/fetch
+    的三级),导致真实回收下来并已落盘的 PDF 被 coverage 漏计。
+
+    **口径治理(总指挥 -142 定)**:嵌套扫描**默认关闭**,以保证默认(权威)运行仍是「只扫一级」
+    的稳定 999/371 基线、不被实验目录污染;仅在**显式开启**时才纳入二级+ 产出,且必须经 QC 门
+    才可作权威回写。规则:
+      - 一级目录:一律收录(与旧实现逐字等价 → 严格保持审计基线);
+      - include_nested=False(**默认**):只扫一级(旧权威行为);
+      - include_nested=True(需显式 --nested / flag):额外递归收录二级+ 产出,但剔除顶层名含
+        demo/smoke 的测试夹具(见 _NESTED_EXCLUDE_SUBSTR;它们含语料外 DOI 会污染权威口径);
+      - extra_dirs:显式强制纳入的相对目录(绕过 demo/smoke 排除、且无视 include_nested,供人工
+        定向圈定,如 Step2 只回写 rerun_acs_144/fetch)。
+    """
     if not os.path.isdir(out_root):
         return []
+    seen: Set[str] = set()
     items: List[Tuple[float, str]] = []
+
+    def _add(rel: str) -> None:
+        rel = rel.replace("\\", "/").strip("/")
+        if not rel or rel in seen:
+            return
+        if not os.path.isfile(os.path.join(out_root, rel, "metadata.jsonl")):
+            return
+        seen.add(rel)
+        try:
+            mt = os.path.getmtime(os.path.join(out_root, rel, "metadata.jsonl"))
+        except OSError:
+            mt = 0.0
+        items.append((mt, rel))
+
+    # 一级目录:照旧全收(与旧实现等价,保持基线)
     for name in os.listdir(out_root):
-        full = os.path.join(out_root, name)
-        meta = os.path.join(full, "metadata.jsonl")
-        if os.path.isdir(full) and os.path.isfile(meta):
-            try:
-                mt = os.path.getmtime(meta)
-            except OSError:
-                mt = 0.0
-            items.append((mt, name))
+        if os.path.isfile(os.path.join(out_root, name, "metadata.jsonl")):
+            _add(name)
+
+    # 二级+ 目录:递归发现,剔除 demo/smoke 测试夹具(仅按顶层名判定)
+    if include_nested:
+        for root, _dirs, files in os.walk(out_root):
+            if "metadata.jsonl" not in files:
+                continue
+            rel = os.path.relpath(root, out_root).replace("\\", "/")
+            if rel == "." or "/" not in rel:
+                continue  # 根目录 / 一级目录已在上面处理
+            top = rel.split("/", 1)[0]
+            if any(sub in top for sub in exclude_substrings):
+                continue
+            _add(rel)
+
+    # 显式强制纳入(绕过 demo/smoke 排除;已收录的自动去重)
+    for rel in (extra_dirs or []):
+        _add(rel)
+
     items.sort(key=lambda t: (t[0], t[1]))
-    return [name for _mt, name in items]
+    return [rel for _mt, rel in items]
 
 
 def build(out_root: str,
           qc_hard: Optional[Set[str]] = None,
-          qc_soft: Optional[Set[str]] = None) -> Dict[str, Any]:
-    """扫描 out_root 下所有批次,返回聚合结果(cov 记录 + 各批统计 + 全局汇总)。
+          qc_soft: Optional[Set[str]] = None,
+          *,
+          qc_allow: Optional[Set[str]] = None,
+          include_nested: bool = False,
+          exclude_substrings: Tuple[str, ...] = _NESTED_EXCLUDE_SUBSTR,
+          extra_dirs: Optional[Iterable[str]] = None) -> Dict[str, Any]:
+    """扫描 out_root 下所有批次(含二级+ 嵌套 metadata.jsonl),返回聚合结果(cov 记录 + 各批统计 + 全局汇总)。
 
     QC 黑名单(来自审计):qc_hard=两法都判错的铁证 DOI,qc_soft=并集(可含 hard)。凡命中者
     即便真实下到 pdf 也**判为抓错论文的假成功**,从 success 剔除、改判 miss(计入 still_missing),
-    并标 qc=hard_reject/soft_reject。两集均为已规范化的裸 DOI(与 norm_doi 同口径)。"""
+    并标 qc=hard_reject/soft_reject。两集均为已规范化的裸 DOI(与 norm_doi 同口径)。
+
+    qc_allow(白名单/免死金牌):下游**逐条内容QC**已核实为「真正文正确」的 DOI,即便命中审计黑名单
+    (hard/union)也**不剔除**(用于纠正 DOI 键黑名单的假阳:同一 DOI 早前抓错、这次经新路线抓对了)。
+    仅「解除拦截」,不凭空造成功——DOI 若本就不是落盘真成功,列入白名单也无效。命中者在 records 标
+    qc=allow_override,summary.qc.allow_override 计数。优先级最高(白名单 > 黑名单)。
+
+    include_nested/exclude_substrings/extra_dirs 透传 list_batch_dirs(默认递归收录嵌套产出、
+    剔除 demo/smoke 夹具);见其 docstring。"""
     qc_hard = qc_hard or set()
     qc_soft = (qc_soft or set()) | qc_hard   # 并集始终包含硬黑,便于 soft=union-hard 归类
-    dirs = list_batch_dirs(out_root)
+    qc_allow = qc_allow or set()
+    qc_hard = qc_hard - qc_allow             # 白名单优先级最高:内容QC 已核实真正文,免于黑名单剔除
+    qc_soft = qc_soft - qc_allow
+    dirs = list_batch_dirs(out_root, include_nested=include_nested,
+                           exclude_substrings=exclude_substrings, extra_dirs=extra_dirs)
     cov: Dict[str, Dict[str, Any]] = {}
     per_dir: List[Dict[str, Any]] = []
 
@@ -289,6 +389,7 @@ def build(out_root: str,
 
         per_dir.append({
             "batch": name,
+            "scan_level": "flat" if "/" not in name else "nested",  # 口径治理:每条标 flat/nested 来源,防数字互污
             "is_core_batch": is_core_batch(name),
             "unique_dois": len(dir_dois),                   # 本批去重唯一 DOI(≈该批输入数)
             "unique_real_success": len(dir_real),           # 去重唯一真实成功(pdf 落盘)
@@ -302,12 +403,18 @@ def build(out_root: str,
     records = sorted(cov.values(), key=lambda r: r["doi"])
 
     # ── QC 剔除:命中审计黑名单的“成功”其实是抓错论文的假成功 → 改判 miss、计入 still_missing ──
+    # 白名单已在函数入口从 qc_hard/qc_soft 扣除,故内容QC 核实为真正文者天然不会进入下面的剔除分支。
     success_before_qc = sum(1 for r in records if r["status"] == "success")
     rej_hard = rej_soft = 0
+    n_allow_override = 0
     for r in records:
         if r["status"] != "success":
             continue
         d = r["doi"]
+        if d in qc_allow:                         # 白名单命中且确为落盘真成功:标记留证、免剔除
+            r["qc"] = "allow_override"
+            n_allow_override += 1
+            continue
         if d in qc_hard:
             kind, rej_hard = "hard_reject", rej_hard + 1
             reason = "qc_hard_reject:wrong-paper(title-mismatch,both-methods)"
@@ -352,17 +459,20 @@ def build(out_root: str,
         "qc": {
             "hard_list_dois": len(qc_hard),
             "union_list_dois": len(qc_soft),
+            "allow_list_dois": len(qc_allow),
             "success_before_qc": success_before_qc,
             "rejected_hard": rej_hard,
             "rejected_soft": rej_soft,
             "rejected_total": rej_hard + rej_soft,
+            "allow_override": n_allow_override,
             "success_after_qc": len(success),
             "success_rate_after_qc": round(len(success) / total, 4) if total else 0.0,
             "note": (
                 f"消费审计 QC 黑名单:原始去重成功 {success_before_qc} 剔除抓错论文 "
                 f"{rej_hard + rej_soft}(硬黑 {rej_hard} + 软黑 {rej_soft})→ 净成功 {len(success)}。"
+                f"白名单免剔 {n_allow_override}(内容QC 核实真正文、纠黑名单假阳)。"
                 "被剔除者改判 miss 并进 still_missing(留 qc_rejected_source/pdf 供复核)。"
-                if (qc_hard or qc_soft) else "未启用 QC 黑名单(--no-qc 或文件缺失):success 为原始去重口径,可能含抓错论文假成功。"
+                if (qc_hard or qc_soft or qc_allow) else "未启用 QC 黑名单(--no-qc 或文件缺失):success 为原始去重口径,可能含抓错论文假成功。"
             ),
         },
         "by_source": dict(by_source.most_common()),
@@ -421,6 +531,11 @@ def run_coverage(out_root: str = OUT_DIR,
                  qc_soft_path: Optional[str] = None,
                  qc_manifest_path: Optional[str] = None,
                  qc_uncertain_path: Optional[str] = None,
+                 qc_extra_reject_paths: Optional[Iterable[str]] = None,
+                 qc_allow_paths: Optional[Iterable[str]] = None,
+                 include_nested: bool = False,
+                 exclude_substrings: Tuple[str, ...] = _NESTED_EXCLUDE_SUBSTR,
+                 extra_dirs: Optional[Iterable[str]] = None,
                  write: bool = True,
                  coverage_json: Optional[str] = None,
                  missing_txt: Optional[str] = None) -> Dict[str, Any]:
@@ -435,6 +550,9 @@ def run_coverage(out_root: str = OUT_DIR,
         out_root      扫描根目录(默认 "out")。
         use_qc        是否消费 QC 黑名单剔错论文(默认 True;False=原始去重口径)。
         qc_hard_path/qc_soft_path/qc_uncertain_path  覆盖默认 QC CSV 路径。
+        qc_extra_reject_paths  追加拒收 DOI 清单(并入 union;供下游内容QC 补漏,如 -145 的
+                      rerun_acs_144_deduct_dois_145.txt 里生产门漏判的 SI/错文件)。
+        qc_allow_paths  白名单 DOI 清单(免剔,纠黑名单假阳;内容QC 已核实真正文者)。优先级最高。
         write         是否落盘产物(默认 True)。
         coverage_json/missing_txt  覆盖默认输出路径。
 
@@ -446,6 +564,7 @@ def run_coverage(out_root: str = OUT_DIR,
     """
     qc_hard: Set[str] = set()
     qc_soft: Set[str] = set()
+    qc_allow: Set[str] = set()
     hp = sp = mp = up = None
     if use_qc:
         hp = qc_hard_path or os.path.join(out_root, "qc_merge_highconf_wrong.csv")
@@ -453,14 +572,29 @@ def run_coverage(out_root: str = OUT_DIR,
         mp = qc_manifest_path or os.path.join(out_root, "qc_rejected_manifest.csv")
         up = qc_uncertain_path or os.path.join(out_root, "qc_uncertain_reject.csv")
         qc_hard, qc_soft = resolve_qc_sets(out_root, hp, sp, mp, up)
+        qc_soft |= read_doi_lists(qc_extra_reject_paths)   # 追加拒收(内容QC 补漏)并入 union
+        qc_allow = read_doi_lists(qc_allow_paths)           # 白名单(纠假阳),build 内优先级最高
 
-    result = build(out_root, qc_hard=qc_hard, qc_soft=qc_soft)
+    result = build(out_root, qc_hard=qc_hard, qc_soft=qc_soft, qc_allow=qc_allow,
+                   include_nested=include_nested, exclude_substrings=exclude_substrings,
+                   extra_dirs=extra_dirs)
+    _sd = result["scanned_dirs"]
+    result["_scan"] = {"include_nested": include_nested,
+                       "exclude_substrings": list(exclude_substrings),
+                       "extra_dirs": list(extra_dirs or []),
+                       "caliber": "authoritative(flat-only)" if not include_nested and not (extra_dirs or [])
+                                  else "experimental(nested/extra-dirs·须过QC门方可权威回写)",
+                       "n_flat_dirs": sum(1 for d in _sd if d.get("scan_level") == "flat"),
+                       "n_nested_dirs": sum(1 for d in _sd if d.get("scan_level") == "nested")}
     result["_qc_paths"] = {
         "used": bool(use_qc),
         "hard": hp, "hard_exists": bool(hp and os.path.isfile(hp)),
         "soft": sp, "soft_exists": bool(sp and os.path.isfile(sp)),
         "manifest": mp, "manifest_exists": bool(mp and os.path.isfile(mp)),
         "uncertain": up, "uncertain_exists": bool(up and os.path.isfile(up)),
+        "extra_reject": list(qc_extra_reject_paths or []),
+        "allow": list(qc_allow_paths or []),
+        "allow_dois": sorted(qc_allow),
     }
     if write:
         cj = coverage_json or os.path.join(out_root, "coverage.json")
@@ -485,9 +619,10 @@ def _print_human(result: Dict[str, Any]) -> None:
     print("去重主库(净·已剔 QC 抓错): 唯一 DOI %d | 净成功 %d | 仍缺 %d | 净成功率 %.1f%%  (声称成功无pdf %d)" % (
         s["total_unique_dois"], s["success"], s["miss"], s["success_rate"] * 100,
         s["claimed_success_but_no_pdf"]))
-    print("QC 剔除: 原始成功 %d → 剔除抓错 %d(硬 %d+软 %d)→ 净成功 %d" % (
+    print("QC 剔除: 原始成功 %d → 剔除抓错 %d(硬 %d+软 %d)→ 净成功 %d%s" % (
         q["success_before_qc"], q["rejected_total"], q["rejected_hard"], q["rejected_soft"],
-        q["success_after_qc"]))
+        q["success_after_qc"],
+        ("  [白名单免剔 %d]" % q["allow_override"]) if q.get("allow_override") else ""))
     cc = s["crosscheck_per_batch_sum"]
     print("交叉核对(逐批求和): core metadata %d/%d = %.1f%%(复现审计) | core 落盘 %d | all metadata %d" % (
         cc["core_batches_success_metadata"], cc["core_batches_inputs"],
@@ -519,6 +654,18 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="uncertain 拒收清单 CSV(默认 <out-root>/qc_uncertain_reject.csv;153 抽样 40/40 全错 → 整池并入 union)")
     ap.add_argument("--no-qc", action="store_true",
                     help="不消费 QC 黑名单(success 为原始去重口径,可能含抓错论文假成功)")
+    ap.add_argument("--nested", action="store_true",
+                    help="显式开启二级+ 嵌套扫描(默认关闭=只扫一级权威口径);开启会递归收录 "
+                         "out/<dir>/fetch/metadata.jsonl 等嵌套产出(剔 demo/smoke 夹具)。"
+                         "实验口径,权威回写前须经 QC 门。")
+    ap.add_argument("--extra-dirs", default=None,
+                    help="逗号分隔的相对目录,强制纳入(绕过 demo/smoke 排除、无视 --nested),如 "
+                         "rerun_acs_144/fetch,rerun_elsevier_143/fetch")
+    ap.add_argument("--qc-extra-reject", default=None,
+                    help="逗号分隔的追加拒收 DOI 清单文件(并入 union,补生产门漏判),如 "
+                         "out/rerun_acs_144_deduct_dois_145.txt")
+    ap.add_argument("--qc-allow", default=None,
+                    help="逗号分隔的白名单 DOI 清单文件(免剔、纠黑名单假阳;内容QC 已核实真正文者)")
     ap.add_argument("--no-write", action="store_true", help="只打印汇总,不落盘")
     ap.add_argument("--print-json", action="store_true",
                     help="stdout 输出 summary 的 JSON(供 run_all/父程序按 utf-8 解析接入)")
@@ -528,6 +675,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.selftest:
         return _selftest()
 
+    extra_dirs = [d.strip() for d in (args.extra_dirs or "").split(",") if d.strip()]
+    extra_reject = [d.strip() for d in (args.qc_extra_reject or "").split(",") if d.strip()]
+    allow_paths = [d.strip() for d in (args.qc_allow or "").split(",") if d.strip()]
+
     # CLI 与 import 共享同一实现(run_coverage),确保全组只有一个『黑名单感知』权威口径、不分叉。
     result = run_coverage(
         args.out_root,
@@ -536,6 +687,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         qc_soft_path=args.qc_soft,
         qc_manifest_path=args.qc_manifest,
         qc_uncertain_path=args.qc_uncertain,
+        qc_extra_reject_paths=extra_reject or None,
+        qc_allow_paths=allow_paths or None,
+        include_nested=args.nested,
+        extra_dirs=extra_dirs or None,
         write=not args.no_write,
         coverage_json=args.coverage_json,
         missing_txt=args.missing_txt,
@@ -552,6 +707,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         except AttributeError:
             sys.stdout.write(data.decode("utf-8"))
         return 0
+
+    sc = result.get("_scan") or {}
+    nested_dirs = [d["batch"] for d in result["scanned_dirs"] if "/" in d["batch"]]
+    print("扫描模式: %s | 嵌套目录 %d 个%s%s" % (
+        "含嵌套(--nested·实验口径)" if sc.get("include_nested") else "仅一级(权威口径·默认)",
+        len(nested_dirs),
+        ("  [" + ", ".join(nested_dirs[:8]) + ("…" if len(nested_dirs) > 8 else "") + "]") if nested_dirs else "",
+        ("  强制纳入:" + ",".join(sc.get("extra_dirs") or [])) if sc.get("extra_dirs") else ""))
 
     qp = result.get("_qc_paths") or {}
     if qp.get("used"):
@@ -754,6 +917,101 @@ def _selftest() -> int:
         # 空目录稳健:不存在的 out_root 返回 0 记录、不抛错
         empty = build(os.path.join(tmp, "nope"))
         assert empty["summary"]["total_unique_dois"] == 0, empty["summary"]
+
+        # ── 嵌套扫描(修 -149 盲区):run_all 自带二级 <dir>/fetch/metadata.jsonl 必须被收录 ──
+        # 造一个 rerun 生产目录(二级 fetch,含真实回收 d4 → 应把 d4 从 miss 翻成 success),
+        # 一个 demo 夹具(二级 fetch,含语料外 dNEW → 默认必须被剔除,不得污染 total/success)。
+        rr = os.path.join(root, "rerun_x_144", "fetch")
+        os.makedirs(os.path.join(rr, "pdfs"))
+        with open(os.path.join(rr, "metadata.jsonl"), "w", encoding="utf-8") as f:
+            f.write(rec("10.1000/d4", True, "publisher_oa", "out/rerun_x_144/fetch/pdfs/d4.pdf", 4096))
+        open(os.path.join(rr, "pdfs", "d4.pdf"), "w").close()
+        os.utime(os.path.join(rr, "metadata.jsonl"), (1_000_200, 1_000_200))  # 最新 → 排在末尾
+
+        demo = os.path.join(root, "run_all_demo_zzz", "fetch")
+        os.makedirs(os.path.join(demo, "pdfs"))
+        with open(os.path.join(demo, "metadata.jsonl"), "w", encoding="utf-8") as f:
+            f.write(rec("10.1000/dNEW", True, "arxiv", "out/run_all_demo_zzz/fetch/pdfs/dnew.pdf", 5000))
+        open(os.path.join(demo, "pdfs", "dnew.pdf"), "w").close()
+
+        smoke = os.path.join(root, "smoke999", "fetch")
+        os.makedirs(os.path.join(smoke, "pdfs"))
+        with open(os.path.join(smoke, "metadata.jsonl"), "w", encoding="utf-8") as f:
+            f.write(rec("10.1000/dSMOKE", True, "smoke", "out/smoke999/fetch/pdfs/ds.pdf", 111))
+        open(os.path.join(smoke, "pdfs", "ds.pdf"), "w").close()
+
+        # 显式开启嵌套(剔 demo/smoke):d4 从 miss 翻成 success;dNEW/dSMOKE 语料外 → 不得进入
+        rn = build(root, include_nested=True)
+        bn = {r["doi"]: r for r in rn["records"]}
+        assert bn["10.1000/d4"]["status"] == "success", bn["10.1000/d4"]        # 二级 fetch 被收录
+        assert bn["10.1000/d4"]["source"] == "publisher_oa", bn["10.1000/d4"]
+        assert bn["10.1000/d4"]["batch"] == "rerun_x_144/fetch", bn["10.1000/d4"]  # 相对路径正斜杠归一
+        assert "10.1000/dnew" not in bn, "demo 夹具泄漏进语料"                     # demo 被剔除
+        assert "10.1000/dsmoke" not in bn, "smoke 夹具泄漏进语料"                  # smoke 被剔除
+        assert rn["summary"]["total_unique_dois"] == 5, rn["summary"]           # 仍是 d1..d5,未被夹具污染
+        assert rn["summary"]["success"] == 4, rn["summary"]                     # 原 3 + d4 回收
+
+        # 默认 include_nested=False(权威口径·总指挥定):只扫一级,d4 仍是 miss、总数口径不含任何二级
+        ro = build(root)
+        bo = {r["doi"]: r for r in ro["records"]}
+        assert bo["10.1000/d4"]["status"] == "miss", bo["10.1000/d4"]
+        assert ro["summary"]["success"] == 3, ro["summary"]
+        nested_names = [d["batch"] for d in ro["scanned_dirs"] if "/" in d["batch"]]
+        assert nested_names == [], nested_names
+
+        # extra_dirs:显式强制纳入被排除的 demo 夹具(绕过 exclude、且无视 include_nested)→ dNEW 进入
+        re_ = build(root, extra_dirs=["run_all_demo_zzz/fetch"])   # 注意:默认 nested=False 仍能靠 extra_dirs 纳入
+        bre = {r["doi"]: r for r in re_["records"]}
+        assert "10.1000/dnew" in bre, "extra_dirs 未能强制纳入被排除目录"
+        assert "10.1000/dsmoke" not in bre, bre  # 未圈定的 smoke 仍被剔除
+        # list_batch_dirs 直接自测:开启 nested 时 mtime 升序、正斜杠、一级+二级都在、demo/smoke 剔除
+        ld = list_batch_dirs(root, include_nested=True)
+        assert "rerun_x_144/fetch" in ld and ld[-1] == "rerun_x_144/fetch", ld  # 最新排末尾
+        assert "batchA" in ld and "batchB" in ld, ld
+        assert all("demo" not in x and "smoke" not in x for x in ld), ld
+        # 默认(nested 关):只回一级
+        assert list_batch_dirs(root) == ["batchA", "batchB"], list_batch_dirs(root)
+        # extra_dirs 无视 nested 开关:即便 nested 关,也能定向纳入指定二级目录
+        assert "rerun_x_144/fetch" in list_batch_dirs(root, extra_dirs=["rerun_x_144/fetch"]), \
+            list_batch_dirs(root, extra_dirs=["rerun_x_144/fetch"])
+
+        # ── 白名单/追加拒收(纠 QC 假阳/补漏,供下游内容QC 成员产物驱动回写)──
+        # d1(真成功)本被硬黑;白名单免剔 → 回到 success。d2(真成功)经 extra-reject 追加拒收 → miss。
+        ra = build(root, qc_hard={"10.1000/d1"}, qc_soft={"10.1000/d1"},
+                   qc_allow={"10.1000/d1"})
+        ba = {r["doi"]: r for r in ra["records"]}
+        assert ba["10.1000/d1"]["status"] == "success", ba["10.1000/d1"]      # 白名单免死
+        assert ba["10.1000/d1"]["qc"] == "allow_override", ba["10.1000/d1"]
+        assert ra["summary"]["qc"]["allow_override"] == 1, ra["summary"]["qc"]
+        assert ra["summary"]["qc"]["rejected_total"] == 0, ra["summary"]["qc"]  # 唯一黑名单项被白名单救回
+        # 白名单不凭空造成功:d_ghost 不是落盘真成功,列白名单也不出现在 success
+        rg = build(root, qc_allow={"10.1000/dghost"})
+        assert "10.1000/dghost" not in {r["doi"] for r in rg["records"] if r["status"] == "success"}, "白名单不得凭空造成功"
+
+        # read_doi_list:兼容 TSV(doi\t类型)、# 注释、CSV;取首 token 归一
+        dl = os.path.join(tmp, "deduct.tsv")
+        with open(dl, "w", encoding="utf-8") as f:
+            f.write("# comment line\n")
+            f.write("10.1000/d2\tSI-only(supporting info)\n")
+            f.write("https://doi.org/10.1000/D3 , extra\n")
+        assert read_doi_list(dl) == {"10.1000/d2", "10.1000/d3"}, read_doi_list(dl)
+        assert read_doi_list(os.path.join(tmp, "nope.tsv")) == set()
+
+        # run_coverage 端到端:extra-reject 追加拒收 d2、allow 救回被黑名单的 d1
+        allow_f = os.path.join(tmp, "allow.txt")
+        with open(allow_f, "w", encoding="utf-8") as f:
+            f.write("10.1000/d1\n")
+        # 用一个把 d1/d2 都拉黑的 union csv 作基线,再验证 allow 救 d1、extra-reject 保持 d2 被拒
+        union_f = os.path.join(tmp, "union.csv")
+        with open(union_f, "w", encoding="utf-8") as f:
+            f.write("doi\n10.1000/d1\n")
+        rc_a = run_coverage(root, use_qc=True, qc_hard_path=union_f, qc_soft_path=union_f,
+                            qc_extra_reject_paths=[dl], qc_allow_paths=[allow_f], write=False)
+        bca = {r["doi"]: r for r in rc_a["records"]}
+        assert bca["10.1000/d1"]["status"] == "success", bca["10.1000/d1"]     # allow 救回
+        assert bca["10.1000/d2"]["status"] == "miss", bca["10.1000/d2"]        # extra-reject 拉黑
+        assert rc_a["summary"]["qc"]["allow_override"] == 1, rc_a["summary"]["qc"]
+        assert rc_a["_qc_paths"]["allow_dois"] == ["10.1000/d1"], rc_a["_qc_paths"]
 
         print("COVERAGE_OK")
         return 0
