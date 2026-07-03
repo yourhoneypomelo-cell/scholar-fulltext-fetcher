@@ -30,17 +30,13 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      # 只装强制依赖 requests(见 fulltext_fetcher/requirements.txt);
-      # openpyxl 为可选依赖,故意不安装 —— 用以验证"零可选依赖"路径:
-      # cli 的 .xlsx 读取有 try/except 兜底,selftest 只走 CSV/TXT,不需 openpyxl。
-      - name: Install dependencies (requests only; openpyxl left out on purpose)
+      # 装核心 + 内容 QC 依赖([qc]=pypdf/rapidfuzz):离线 selftest 里 download/selftest_e2e/
+      # build_coverage 的内容 QC 路径需 pypdf 才能全绿。[cf]/[browser] 为可选(需 curl_cffi/Chrome),
+      # 相关模块函数内延迟导入、缺则优雅 no-op,故 CI 不装、不影响其 selftest 通过。
+      - name: Install (core + content-QC deps)
         run: |
           python -m pip install --upgrade pip
-          if [ -f fulltext_fetcher/requirements.txt ]; then
-            pip install -r fulltext_fetcher/requirements.txt
-          else
-            pip install "requests>=2.28"
-          fi
+          pip install -e ".[qc]"
 
       # 语法/导入基线:全部模块可编译。
       - name: Compile all modules

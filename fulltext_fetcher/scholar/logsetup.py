@@ -48,7 +48,10 @@ if __name__ == "__main__":  # 不联网 selftest: python -m fulltext_fetcher.sch
 
     # —— EventLog 端到端(临时目录):emit → 读回一行 JSON,含 ts/event/自定义字段 ——
     # 注:Windows 下须先关闭 run.log 的 FileHandler 再清理临时目录,否则文件占用无法删除。
-    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
+    import sys as _sys
+    # ignore_cleanup_errors 仅 py3.10+ 支持(Windows 下抑制 run.log 占用致清理报错);py3.8/3.9 省略该参
+    _td_kw = {"ignore_cleanup_errors": True} if _sys.version_info >= (3, 10) else {}
+    with tempfile.TemporaryDirectory(**_td_kw) as d:
         log = setup_logging(d, "INFO")
         try:
             log.info("scholar logsetup selftest")

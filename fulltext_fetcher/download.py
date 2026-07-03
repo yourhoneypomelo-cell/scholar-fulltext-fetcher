@@ -1258,11 +1258,14 @@ def _browser_capture_fallback(
         return None
     if _is_shadow_library(url) and not getattr(cfg, "enable_scihub", False):
         return None
-    try:
-        from .render_fetch import render_download_pdf_bytes
-    except ImportError:
-        return None
-    render = _render_fn or render_download_pdf_bytes
+    if _render_fn is not None:
+        render = _render_fn        # selftest 注入的 render:直接用,免依赖 render_fetch 导入链(CI 无可选依赖时亦不误 no-op)
+    else:
+        try:
+            from .render_fetch import render_download_pdf_bytes
+        except ImportError:
+            return None
+        render = render_download_pdf_bytes
     headless = bool(getattr(cfg, "browser_pdf_headless", False))
     timeout = float(getattr(cfg, "timeout", 30.0) or 30.0)
     pdf_url_fallbacks = _static_pdf_fallbacks(getattr(paper, "doi", None), url)
