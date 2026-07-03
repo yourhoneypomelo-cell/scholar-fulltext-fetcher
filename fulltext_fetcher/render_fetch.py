@@ -36,6 +36,7 @@ import contextlib
 import json
 import os
 import random
+import re
 import sys
 import threading
 import time
@@ -689,6 +690,94 @@ def _offscreen_args(headless: bool) -> List[str]:
     return ["--window-position=-2400,-2400"]
 
 
+def _route_b_user_data_dir() -> Optional[str]:
+    """(-165 P4)route-B 持久化浏览器档案目录:让 CF/Turnstile 看到「回访人类」(复用历史 cookie/信誉)。
+    由 ``FTF_ROUTE_B_USER_DATA_DIR`` 提供;未设 → None(nodriver 用临时档案,默认行为不变)。"""
+    d = (os.environ.get("FTF_ROUTE_B_USER_DATA_DIR") or "").strip()
+    return d or None
+
+
+# ── CF Turnstile 硬解题(-146:攻克 image1 的「Verify you are human」交互式验证)──────────
+# 与 RSC governor 坏 reCAPTCHA(不可解、只冷却)不同:CF Turnstile 有合法 sitekey,capsolver/2captcha
+# 可出 token。真浏览器(nodriver)多数能自动过;仅【硬 Turnstile / 无头 / 被盯上】时才需打码兜底。
+# 全 gated:仅当 env 打码三件套(FTF_CAPTCHA_ENABLED=1 + FTF_CAPTCHA_PROVIDER + FTF_CAPTCHA_KEY)齐备
+# 才启用;默认关 → 下面 hook 完全短路,route-B 行为逐字节不变。下列纯函数离线可测。
+_TURNSTILE_MARKERS = ("cf-turnstile", "challenges.cloudflare.com/turnstile", "turnstile.render")
+_TURNSTILE_SITEKEY_RE = re.compile(
+    r"""(?:data-sitekey|sitekey)\s*[=:]\s*["']?(0x[0-9A-Za-z_\-]{6,})["']?""")
+
+
+def _extract_turnstile_sitekey(html: str) -> Optional[str]:
+    """从 HTML 抽 Cloudflare Turnstile 的 sitekey;无则 None。纯解析、离线可测。
+
+    与 reCAPTCHA(``6L`` 开头、``g-recaptcha``)区分:优先认 ``0x`` 前缀(生产 Turnstile);
+    仅在明确 ``cf-turnstile`` / turnstile 标记上下文里才回退接受其它前缀(测试/自定义 key),
+    避免把 reCAPTCHA 的 sitekey 误当 Turnstile。
+    """
+    if not html:
+        return None
+    m = _TURNSTILE_SITEKEY_RE.search(html)
+    if m:
+        return m.group(1)
+    low = html.lower()
+    if any(mk in low for mk in _TURNSTILE_MARKERS):
+        m2 = re.search(r"""(?:data-sitekey|sitekey)\s*[=:]\s*["']?([0-9A-Za-z_\-]{8,})["']?""", html)
+        if m2:
+            return m2.group(1)
+    return None
+
+
+def _inject_turnstile_token_js(token: str) -> str:
+    """把解出的 Turnstile token 填入页面隐藏域并尝试触发回调,便于表单提交/质询通过(best-effort)。"""
+    return (
+        "(function(t){try{var n=0;"
+        "var els=document.querySelectorAll("
+        "'[name=\"cf-turnstile-response\"],#cf-chl-widget-response,"
+        "textarea.cf-turnstile-response,input.cf-turnstile-response');"
+        "for(var i=0;i<els.length;i++){els[i].value=t;n++;}"
+        "try{if(typeof window.tsCallback==='function')window.tsCallback(t);}catch(e){}"
+        "return 'set:'+n;}catch(e){return 'ERR:'+e;}})(%s)"
+    ) % json.dumps(token)
+
+
+def _env_captcha_cfg() -> Any:
+    """route-B 用:从 env 读打码配置(默认关),返回 ScholarConfig-like 轻量对象。"""
+    import types
+    return types.SimpleNamespace(
+        captcha_enabled=_env_true("FTF_CAPTCHA_ENABLED"),
+        captcha_provider=(os.environ.get("FTF_CAPTCHA_PROVIDER") or "").strip() or None,
+        captcha_key=(os.environ.get("FTF_CAPTCHA_KEY") or "").strip() or None,
+    )
+
+
+def _captcha_solving_enabled() -> bool:
+    """route-B Turnstile 打码是否启用:env 三件套齐备才 True(默认关)。"""
+    c = _env_captcha_cfg()
+    return bool(c.captcha_enabled and c.captcha_provider and c.captcha_key)
+
+
+def _solve_turnstile_token(site_key: str, page_url: str) -> Optional[str]:
+    """gated:仅 env 打码齐备时调 scholar.captcha.solve_turnstile 取 token;默认关→None。绝不抛。"""
+    if not _captcha_solving_enabled():
+        return None
+    solve_turnstile: Any = None
+    try:
+        from .scholar.captcha import solve_turnstile as _st  # type: ignore
+        solve_turnstile = _st
+    except Exception:  # noqa: BLE001 - 兜底绝对包路径
+        try:
+            from fulltext_fetcher.scholar.captcha import solve_turnstile as _st2  # type: ignore
+            solve_turnstile = _st2
+        except Exception:  # noqa: BLE001
+            return None
+    try:
+        res = solve_turnstile(site_key, page_url, _env_captcha_cfg())
+    except Exception:  # noqa: BLE001 - 打码异常一律降级为不可用
+        return None
+    tok = res.get("token") if isinstance(res, dict) else None
+    return tok or None
+
+
 def _nodriver_capture_fn(headless: bool = False,
                          pdf_url_fallbacks: Optional[List[str]] = None,
                          injection_plan: Any = None) -> Optional[CaptureFn]:
@@ -722,10 +811,14 @@ def _nodriver_capture_fn(headless: bool = False,
 
         async def _go() -> Tuple[Optional[bytes], str]:
             _hl = _resolve_headless(headless)
-            browser = await nd.start(headless=_hl, browser_args=[
+            _start_kw: Dict[str, Any] = {"headless": _hl, "browser_args": [
                 "--lang=en-US",
                 "--window-size=1600,1000", "--no-first-run", "--no-default-browser-check",
-                *_offscreen_args(_hl)])
+                *_offscreen_args(_hl)]}
+            _udd = _route_b_user_data_dir()      # (-165 P4)持久档案 → CF/Turnstile 视作回访人类(默认 None)
+            if _udd:
+                _start_kw["user_data_dir"] = _udd
+            browser = await nd.start(**_start_kw)
             # how: 哪条子路径最终拿到字节——"b1"=页内 fetch(方法B,同源同 JA3),
             # "b2"=导航 PDF 直链后 Network 域抓(方法A,处理跨域/viewer)。供冒烟报 B1/B2(-142)。
             got: Dict[str, Any] = {"data": None, "how": None}
@@ -907,6 +1000,25 @@ def _nodriver_capture_fn(headless: bool = False,
                         note = "blocked:rsc-governor-softblock" if soft else "blocked:rsc-governor"
                         return None, note
                     blocked_by_text = any(s in txt for s in _BLOCK_SIGNALS)
+                    # (-146)CF Turnstile 硬解题兜底(gated:env 打码三件套齐备才走;默认关→整段短路,
+                    # route-B 行为逐字节不变)。仅在【被质询文案挡住】且【本篇尚未尝试过】时抓一次完整 HTML
+                    # 找 Turnstile sitekey → 打码平台出 token → 注入页面 → 下一轮重判是否已过。真浏览器多数能
+                    # 自动过 Turnstile,此为硬 Turnstile / 无头 / 被盯上时的兜底;RSC governor 坏码走 _looks_governor
+                    # (不到这里),绝不对坏 reCAPTCHA 打码。
+                    if blocked_by_text and _captcha_solving_enabled() and not got.get("ts_tried"):
+                        got["ts_tried"] = True
+                        try:
+                            _full_html = await asyncio.wait_for(tab.get_content(), timeout=8.0)
+                        except Exception:  # noqa: BLE001
+                            _full_html = ""
+                        _sk = _extract_turnstile_sitekey(_full_html)
+                        if _sk:
+                            _cur = (await _eval_str("location.href", t=6.0)) or article_url
+                            _tok = _solve_turnstile_token(_sk, _cur)
+                            if _tok:
+                                await _eval_str(_inject_turnstile_token_js(_tok), t=8.0)
+                                await tab.sleep(3.0)
+                                continue
                     has_clear = await _has_cf_clearance()
                     # RSC 等走 CF→SSO(/connect/authorize)授权回跳:cf_clearance 可能在【仍停在 SSO 中转页】
                     # 时就置上,此时"偷跑"会在 SSO 页上找不到 PDF。故 JA3 站额外要求 href 已回落到非 SSO 中转页
@@ -1196,6 +1308,52 @@ def _selftest_bytes() -> None:
     landing = _rsc_articlepdf_to_landing(
         "https://pubs.rsc.org/en/content/articlepdf/2011/GC/C1GC15503B")
     assert landing == "https://pubs.rsc.org/en/content/articlelanding/2011/GC/C1GC15503B", landing
+
+    # 0c) CF Turnstile 硬解题助手(-146):sitekey 抽取 / token 注入 JS / gated 默认关(全离线)
+    assert _extract_turnstile_sitekey(
+        '<div class="cf-turnstile" data-sitekey="0x4AAAAAAABkMYinukE8nzY"></div>'
+    ) == "0x4AAAAAAABkMYinukE8nzY"
+    assert _extract_turnstile_sitekey('turnstile.render("#x",{sitekey:"0x4AAAAAAABxxxx"})') \
+        == "0x4AAAAAAABxxxx"
+    # reCAPTCHA(6L 前缀、无 cf-turnstile 标记)不应被误判为 Turnstile
+    assert _extract_turnstile_sitekey(
+        '<div class="g-recaptcha" data-sitekey="6LcAAAAAAAAAAAAAAAAA"></div>') is None
+    assert _extract_turnstile_sitekey("") is None
+    assert _extract_turnstile_sitekey("<div>no challenge here</div>") is None
+    # cf-turnstile 上下文里的测试 key(非 0x 前缀)可回退命中
+    assert _extract_turnstile_sitekey(
+        '<div class="cf-turnstile" data-sitekey="1x00000000000000000000AA"></div>'
+    ) == "1x00000000000000000000AA"
+    _tsjs = _inject_turnstile_token_js("TOK_abc123")
+    assert "TOK_abc123" in _tsjs and _tsjs.startswith("(function"), _tsjs
+    # gated 默认关:env 未设 → 不启用、solve 短路为 None(不导库、不联网)
+    for _k in ("FTF_CAPTCHA_ENABLED", "FTF_CAPTCHA_PROVIDER", "FTF_CAPTCHA_KEY"):
+        os.environ.pop(_k, None)
+    assert _captcha_solving_enabled() is False
+    assert _env_captcha_cfg().captcha_enabled is False
+    assert _solve_turnstile_token("0xkey", "https://pubs.rsc.org/a") is None
+    # env 齐备但缺打码库时:启用判定 True,但 solve 优雅降级为 None(need <dep>,不联网)
+    import importlib.util as _ilu
+    if _ilu.find_spec("capsolver") is None:
+        os.environ["FTF_CAPTCHA_ENABLED"] = "1"
+        os.environ["FTF_CAPTCHA_PROVIDER"] = "capsolver"
+        os.environ["FTF_CAPTCHA_KEY"] = "K"
+        try:
+            assert _captcha_solving_enabled() is True
+            assert _solve_turnstile_token("0xkey", "https://pubs.rsc.org/a") is None
+        finally:
+            for _k in ("FTF_CAPTCHA_ENABLED", "FTF_CAPTCHA_PROVIDER", "FTF_CAPTCHA_KEY"):
+                os.environ.pop(_k, None)
+    # P4:持久档案目录 env 未设 → None(默认行为不变)
+    _saved_udd = os.environ.pop("FTF_ROUTE_B_USER_DATA_DIR", None)
+    try:
+        assert _route_b_user_data_dir() is None
+        os.environ["FTF_ROUTE_B_USER_DATA_DIR"] = "/tmp/ftf_profile"
+        assert _route_b_user_data_dir() == "/tmp/ftf_profile"
+    finally:
+        os.environ.pop("FTF_ROUTE_B_USER_DATA_DIR", None)
+        if _saved_udd is not None:
+            os.environ["FTF_ROUTE_B_USER_DATA_DIR"] = _saved_udd
 
     # 0b) A5 route-B 注入:ezproxy 改写 + inject hook(离线 mock tab)
     from fulltext_fetcher.institutional.route_b_bridge import BrowserCookieSpec, RouteBInjectionPlan
