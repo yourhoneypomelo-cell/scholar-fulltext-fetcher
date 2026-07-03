@@ -74,7 +74,7 @@ python run_all.py --selftest              # → RUN_ALL_OK
 python tools/build_coverage.py --selftest # → COVERAGE_OK
 ```
 
-> Python **≥ 3.8**；Windows / Linux / macOS 均可。OCR 不是打包依赖（历史 OCR 桶为一次性探针处置，非运行期扩展）。
+> Python **≥ 3.9**（与 CI 测试矩阵 3.9–3.12 一致）；Windows / Linux / macOS 均可。OCR 不是打包依赖（历史 OCR 桶为一次性探针处置，非运行期扩展）。
 
 ---
 
