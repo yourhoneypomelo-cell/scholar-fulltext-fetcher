@@ -1,5 +1,9 @@
 # 谷歌学术人机认证 · 全文批量下载「一键正门」
 
+[![CI](https://github.com/yourhoneypomelo-cell/scholar-fulltext-fetcher/actions/workflows/ci.yml/badge.svg)](https://github.com/yourhoneypomelo-cell/scholar-fulltext-fetcher/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](pyproject.toml)
+
 > **一句话**：**输入 DOI / 标题 → 一条命令 → 全网可及的免费开放获取（OA）全文 PDF，统一命名落到单一文件夹 + 覆盖率报告。** 全程程序化、无人值守。
 >
 > 本仓库含两部分：
