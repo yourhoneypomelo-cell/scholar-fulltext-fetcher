@@ -306,6 +306,23 @@ run_all_summary : out/my_batch/run_all_summary.json
 
 查看 QC 消费情况：一页式总结里 `QC 剔抓错论文: 原始成功 A → 剔 B → 净 C`。
 
+### 5.4b 落盘期内容 QC 门①–⑤（含 -143 新增门③ meta-doi-mismatch）
+
+落盘前每份 PDF 过 `download._content_qc_gate`（需 `[qc]` 依赖：`pypdf`+`rapidfuzz`；缺依赖默认 **fail-closed** 拒收）。判 `mismatch` → 不落盘、记 `content_qc` 事件（`attempts.jsonl`）；判 `uncertain` → 放行但打标；判 `match` → 落盘。五道门各治一类「像这篇但不是这篇」：
+
+| 门 | 判据 | 治什么 |
+|---|---|---|
+| 强正① | 期望 DOI 出现在 **URL 或正文/摘要区** | 有正证据即判 match（压过下面各门；仅参考文献区命中不算） |
+| 门① | 能抽出正文且**标题分 < 阈** | 明确他题（URL 法看不到的真错论文） |
+| 门② | **URL/正文首部**嵌了另一家出版商/另一个 DOI | title 假匹配、未来年份 DOI |
+| **门③（-143 新增）** | **PDF 自述元数据 DOI（XMP `prism:doi`/`dc:identifier` 或 `/Info`）全部 ≠ 期望且期望不在其中** | **「同题他刊」**——标题近同、期望 DOI 不在正文首部，唯 PDF 内嵌 DOI 能识破（如 `cctc.200900261`） |
+| 门④⑤ | SI / citation-report / poster / 卷期目录等**非正文版式** | 首页印对标题+DOI 却不是正文（默认降级 uncertain；回收波置 `content_qc_non_article_hard_reject=1` → 硬拒 mismatch） |
+
+**门③ 运维要点（-143）**：
+- **精度优先、几乎不误杀**：门③ 只在**强正①未命中**（期望 DOI 不在 URL/正文）时才可能触发；元数据**含期望 DOI** 或 **PDF 无自述 DOI** → 不触发。真实落盘 PDF 抽样（-143）显示 accepted 桶约 **22%** 有自述 DOI，其中「自述 DOI 与文件名 DOI 全不同」者开卷复核**全部是已存在的错论文假阳**（仓库封面页 / 跨刊 / 同刊异年），门③ 命中均为**正确捕获**、非误杀。
+- **日志识别**：`attempts.jsonl` 里 `content_qc` 事件 `reason` 形如 `meta-doi-mismatch(10.xxxx/aaa!=10.yyyy/bbb)`；一键正门里该条会计 miss（不计净成功）。
+- **回归护栏**：`RUN_DATA_REGRESS=1 python -m tools.regress_qc_union_189` 含门③ 确定性负/正样本（`_gate3_selfcheck`）+ 真数据回放；改 QC 门逻辑后务必跑一次。
+
 ### 5.5 快速人工抽查
 
 1. **浏览器**：打开 `out/my_batch/fetch/report.html`  

@@ -38,7 +38,7 @@ python run_all.py -f examples/sample_dois.txt --email $env:FULLTEXT_EMAIL -o out
 
 - **输入**：DOI / arXiv id / 论文标题，可**混排**；支持 `.txt` / `.csv` / `.xlsx`（`.xlsx` 需 `[xlsx]` 扩展）。
 - **多源回退定位 OA 全文**：OpenAlex / Unpaywall / Crossref / Semantic Scholar / Europe PMC / arXiv / 预印本 / 出版商直链 … + websearch 兜底。
-- **落盘前内容 QC**：抽 PDF 首两页正文 + 元数据标题做模糊匹配，拦「下到错论文」的系统性假阳（**默认 fail-closed**）。
+- **落盘前内容 QC（门①–⑤）**：抽 PDF 首两页正文 + 元数据标题/DOI 做多锚点校验，拦「下到错论文」的系统性假阳（**默认 fail-closed**）。含门③ `meta-doi-mismatch`（PDF 自述元数据 DOI 与期望反向比对，专拦「同题他刊」；-143 落地）。门口径详见《用户Runbook-一键正门批量下载.md》§5.4b。
 - **统一命名 + 跨批去重/续跑 + 覆盖率报告**：`coverage.json` / `still_missing.txt` / 一页式总结 / 逐条明细 `run_all_detail.tsv`。
 - **全自动 · 无人值守**：默认不弹浏览器、不需人工登录、不需 AI 介入——一条命令跑到底，每条输入都有明确终态（成功落盘 / 进 `still_missing`）。强 CF 站或机构订阅才需额外开关（见下）。
 
