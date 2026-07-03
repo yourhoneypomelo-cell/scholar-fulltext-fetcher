@@ -15,7 +15,8 @@
 ### 1) 安装
 
 ```powershell
-cd "e:\AI项目\谷歌学术人机认证"
+git clone https://github.com/yourhoneypomelo-cell/scholar-fulltext-fetcher.git
+cd scholar-fulltext-fetcher
 pip install -e ".[qc]"     # 推荐：核心 + 内容 QC（拦"下到错论文"假阳）
 ```
 
