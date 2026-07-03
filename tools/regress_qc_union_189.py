@@ -11,6 +11,9 @@
       (证明现实现是并集,不是交集)。
   检查②(34 假匹配桶):verdict_151∈{match,uncertain} 的行(审计已定性 url_wrong 错论文)
       → 现门应**全拒**(门②独立于标题)。
+  检查③(门③ meta-doi-mismatch,-143):PDF 内嵌元数据 DOI(XMP prism:doi/dc:identifier 或 /Info)
+      与期望【全不同】→ 现门应判 mismatch(专拦"同题他刊"title 假匹配)。含确定性负/正样本
+      (_gate3_selfcheck,数据无关始终跑);真数据回放亦经 _replay 把落盘 PDF 的内嵌 DOI 喂给现门。
 
 依赖数据:out/qc_merge_union_wrong.csv + 各批 metadata.jsonl(期望标题)+ 被隔离到
 rejected/ 的 PDF(resolve_pdf_path 兜底)。数据缺失 → 显式报错退出(数据回归,不装 PASS)。
@@ -72,16 +75,46 @@ def _replay(row: dict, titles: dict, m: dict):
     meta_title, text, err = extract_pdf(path)
     if err is not None:
         return None
-    return dl._content_qc_verdict(row["pdf_url"], meta_title, text, exp_title, row["doi"], m)
+    # 门③(-143):把落盘 PDF 的内嵌元数据 DOI(XMP/Info)也喂给现门,让真数据回放也覆盖 meta-doi-mismatch。
+    meta_dois: list = []
+    try:
+        with open(path, "rb") as f:
+            meta_dois = dl._extract_pdf_meta_dois(f.read())
+    except Exception:  # noqa: BLE001 - 读取/解析失败 → 无内嵌 DOI(门③ 不触发,不影响其它门)
+        meta_dois = []
+    return dl._content_qc_verdict(row["pdf_url"], meta_title, text, exp_title, row["doi"], m,
+                                  meta_dois=meta_dois)
+
+
+def _gate3_selfcheck(m: dict) -> None:
+    """门③(meta-doi-mismatch,-143)确定性负/正样本(不依赖 out/ 数据,始终执行,防单行回归):
+      · 负样本(同题他刊:标题高度重叠但 PDF 内嵌 DOI 是他篇)→ 现门必判 mismatch;
+      · 正样本(元数据含期望 DOI / 无内嵌 DOI)→ 绝不误杀(不得判 mismatch)。
+    """
+    exp_doi = "10.3762/bjoc.99.999"                       # 冷门前缀,排除门②(跨社标签)干扰
+    exp_title = "Catalytic dehydrogenation over supported palladium membranes"
+    body = "Abstract. Introduction. Results and discussion. " + exp_title    # 含期望标题、不含期望 DOI
+    v, _s, r = dl._content_qc_verdict("https://x/other.pdf", exp_title, body, exp_title, exp_doi, m,
+                                      meta_dois=["10.3762/bjoc.5.10"])
+    assert v == "mismatch" and r.startswith("meta-doi-mismatch"), ("gate3-neg", v, r)
+    v, _s, r = dl._content_qc_verdict("https://x/right.pdf", exp_title, body, exp_title, exp_doi, m,
+                                      meta_dois=["10.3762/bjoc.99.999"])
+    assert v != "mismatch", ("gate3-pos-expected-present", v, r)
+    v, _s, r = dl._content_qc_verdict("https://x/nometa.pdf", exp_title, body, exp_title, exp_doi, m,
+                                      meta_dois=[])
+    assert v != "mismatch", ("gate3-pos-no-meta", v, r)
+    print("[3] 门③ meta-doi-mismatch 负/正样本: 负样本(同题他刊·内嵌 DOI 异)→ mismatch OK | "
+          "正样本(含期望 / 无内嵌 DOI)→ 不误杀 OK")
 
 
 def main() -> int:
-    if not os.path.isfile(CSV):
-        print(f"BLOCKED: 缺数据文件 {CSV}(本回归依赖审计产物,不可脱数据运行)", file=sys.stderr)
-        return 2
     m = dl._qc_matchers()
     if m is None:
         print("BLOCKED: 缺 pypdf/rapidfuzz/tools.qc_content_match,无法回归", file=sys.stderr)
+        return 2
+    _gate3_selfcheck(m)                                   # 门③(-143):确定性负/正样本,数据无关,先跑
+    if not os.path.isfile(CSV):
+        print(f"BLOCKED: 缺数据文件 {CSV}(本回归依赖审计产物,不可脱数据运行)", file=sys.stderr)
         return 2
     titles = load_expected_titles()
     rows = list(csv.DictReader(open(CSV, encoding="utf-8-sig")))

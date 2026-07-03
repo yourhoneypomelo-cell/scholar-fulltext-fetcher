@@ -477,6 +477,68 @@ def _pdf_page_count(data: bytes) -> Optional[int]:
         return None
 
 
+def _extract_pdf_meta_dois(data: bytes) -> list:
+    """从 PDF 元数据(/Info 文档信息 + XMP)抽出内嵌的 DOI 串(原样、去重);缺 pypdf / 任何异常 → []。
+
+    仅供门③(meta-doi-mismatch)做「PDF 自述身份 DOI vs 期望 DOI」反向比对——出版商 PDF 几乎必在
+    XMP(``prism:doi`` / ``dc:identifier``)或 /Info 里写自己的 DOI,若与期望【全不同】即该 PDF 自证
+    为他篇(专拦"同题他刊"title 假匹配)。与 _extract_pdf_text_meta 同哲学:延迟取 pypdf、任何异常降级
+    为 [](交由门放行,绝不误杀、绝不抛)。pypdf 各版本 XMP API 有别,故多路兜底。
+    """
+    reader = _pdf_reader()
+    if reader is None:
+        return []
+    import io
+    out: list = []
+
+    def _collect(s: Any) -> None:
+        for mobj in _QC_DOI_RE.finditer(str(s or "")):
+            d = mobj.group(0)
+            if d not in out:
+                out.append(d)
+
+    try:
+        r = reader(io.BytesIO(data))
+    except Exception:  # noqa: BLE001 - 解析失败 → 无元数据 DOI
+        return []
+    # (a) /Info 文档信息:遍历所有值(常见键 /doi /prism:doi /Subject /Keywords /wps-articledoi)
+    try:
+        md = r.metadata
+        if md:
+            try:
+                vals = list(md.values())
+            except Exception:  # noqa: BLE001 - 畸形字典 → 跳过
+                vals = []
+            for v in vals:
+                _collect(v)
+    except Exception:  # noqa: BLE001 - 元数据缺失/畸形
+        pass
+    # (b) XMP:取原始 XML 文本(prism:doi / dc:identifier 常载 DOI),正则捞 DOI;pypdf 版本差异多路兜底
+    try:
+        xmp = r.xmp_metadata
+        if xmp is not None:
+            raw = None
+            st = getattr(xmp, "stream", None)
+            if st is not None:
+                try:
+                    raw = st.get_data()
+                except Exception:  # noqa: BLE001 - 流读取失败 → 走下一兜底
+                    raw = None
+            if raw is None:
+                root = getattr(xmp, "rdf_root", None)
+                if root is not None:
+                    try:
+                        raw = root.ownerDocument.toxml()
+                    except Exception:  # noqa: BLE001 - DOM 序列化失败 → 放弃 XMP
+                        raw = None
+            if raw is not None:
+                _collect(raw.decode("utf-8", "replace")
+                         if isinstance(raw, (bytes, bytearray)) else raw)
+    except Exception:  # noqa: BLE001 - 无 XMP / 版本 API 差异
+        pass
+    return out
+
+
 def _qc_matchers():
     """(延迟、异常安全)复用 151 的 tools/qc_content_match 匹配原语,绝不重复造匹配逻辑。
 
@@ -716,7 +778,8 @@ def _content_qc_non_article_reject(url, meta_title, text, source, page_count):
 
 
 def _content_qc_verdict(url, meta_title, text, exp_title, exp_doi, m,
-                        source=None, page_count=None, non_article=True, hard_reject=False):
+                        source=None, page_count=None, non_article=True, hard_reject=False,
+                        meta_dois=None):
     """判定 (verdict, score, reason);**双门 union**(总指挥二次校正:审计逐条交叉验证确认标题法
     mismatch 属实、非过判——350 条真错论文 URL 法看不到,故不能只取交集)。
 
@@ -773,6 +836,17 @@ def _content_qc_verdict(url, meta_title, text, exp_title, exp_doi, m,
     conflict, why2 = _qc_doi_publisher_conflict(url, text, exp_doi, norm_for_doi)
     if conflict:
         return "mismatch", score, f"url-doi-conflict({why2})"
+
+    # 门③(meta-doi-mismatch,元数据反向门,-143):PDF 自述 DOI(XMP prism:doi/dc:identifier 或 /Info)
+    #   【全部】≠ 期望 DOI 且期望不在其中 → 该 PDF 元数据自证为【他篇】,专拦"同题他刊"title 假匹配
+    #   (如 cctc.200900261:标题近同、期望 DOI 不在正文首部,靠内嵌 DOI 才能识破)。
+    #   精度优先:仅在①强正未命中(期望 DOI 不在 URL/正文区,否则上面已 return match)时才走到这里,
+    #   故【有正证据就不据元数据翻案】;元数据无 DOI(meta_dois 空)或含期望 → 不触发,绝不误杀真正文。
+    if exp_doi and meta_dois:
+        en3 = norm_for_doi(exp_doi)
+        norm_meta = [nd for nd in (norm_for_doi(d) for d in meta_dois if d) if nd]
+        if en3 and norm_meta and en3 not in norm_meta:
+            return "mismatch", score, f"meta-doi-mismatch({norm_meta[0][:32]}!={en3[:32]})"
 
     if score >= match_hi:
         if na_hit:                                  # 非正文优先于标题 match:标题对但拿到 SI/目录 → 降级
@@ -846,11 +920,12 @@ def _content_qc_gate(data: bytes, paper: Any, source: Any, url: Any, cfg: Any, l
     hard_reject = getattr(cfg, "content_qc_non_article_hard_reject", False)
     try:
         meta_title, text = _extract_pdf_text_meta(data)
+        meta_dois = _extract_pdf_meta_dois(data)          # 门③:PDF 自述 DOI(XMP/Info)反向比对
         page_count = _pdf_page_count(data) if non_article else None
         verdict, score, reason = _content_qc_verdict(
             url, meta_title, text, exp_title, doi, m,
             source=source, page_count=page_count,
-            non_article=non_article, hard_reject=hard_reject)
+            non_article=non_article, hard_reject=hard_reject, meta_dois=meta_dois)
     except Exception as e:  # noqa: BLE001 - 门绝不能让主流程崩;任何异常一律放行
         _safe_log(log, "content-qc 异常(放行) source=%s: %s", source, e)
         return None
@@ -2286,6 +2361,29 @@ def _selftest() -> None:
         v, sc, _r = _V("http://x/partialrefs.pdf", None,
                        _PARTIAL + " References doi " + _QCPaper.doi, _QCPaper.title, _QCPaper.doi, _matchers)
         assert v == "uncertain" and _r == "partial-title-overlap+doi-in-references-only", (v, sc, _r)
+
+        # ── ⑦.1a 门③ meta-doi-mismatch(-143):PDF 内嵌元数据 DOI(XMP/Info)与期望反向比对 ──
+        #    专拦"同题他刊"——标题高度重叠(会 title-match)但 PDF 自述 DOI 是另一篇 → 靠内嵌 DOI 识破。
+        _G3_T = "Catalytic dehydrogenation over supported palladium membranes"
+        _G3_EXP = "10.3762/bjoc.99.999"                   # 期望(冷门前缀,不在 _QC_PREFIX_LABELS,排除门②干扰)
+        _G3_BODY = "Abstract. Introduction. Results and discussion. " + _G3_T   # 正文含期望标题、不含期望 DOI
+        # (a) 负样本:元数据 DOI 是他篇(≠ 期望,期望不在其中)→ mismatch(门③ 拦住 title 假匹配)
+        v, sc, _r = _V("https://www.beilstein-journals.org/bjoc/x.pdf", _G3_T, _G3_BODY,
+                       _G3_T, _G3_EXP, _matchers, meta_dois=["10.3762/bjoc.5.10"])
+        assert v == "mismatch" and _r.startswith("meta-doi-mismatch"), (v, sc, _r)
+        # (b) 正样本不误杀①:元数据 DOI 含期望 → 门③ 不触发 → 回落标题 match
+        v, sc, _r = _V("https://www.beilstein-journals.org/bjoc/x.pdf", _G3_T, _G3_BODY,
+                       _G3_T, _G3_EXP, _matchers, meta_dois=["10.3762/bjoc.99.999"])
+        assert v == "match", (v, sc, _r)
+        # (c) 正样本不误杀②:无元数据 DOI(meta_dois 空)→ 门③ 不触发(与旧行为一致)
+        v, sc, _r = _V("https://www.beilstein-journals.org/bjoc/x.pdf", _G3_T, _G3_BODY,
+                       _G3_T, _G3_EXP, _matchers, meta_dois=[])
+        assert v == "match", (v, sc, _r)
+        # (d) ①强正优先于门③:期望 DOI 在正文区命中 → match,即便元数据另有他 DOI 也不据元数据翻案
+        v, sc, _r = _V("https://www.beilstein-journals.org/bjoc/x.pdf", _G3_T,
+                       "Abstract doi 10.3762/bjoc.99.999 in body. Introduction. Results.",
+                       _G3_T, _G3_EXP, _matchers, meta_dois=["10.3762/bjoc.5.10"])
+        assert v == "match" and _r == "expected-doi-present", (v, sc, _r)
 
         # ── ⑦.1b 门④⑤ 非正文版式(173):即便同社同 DOI(expected-doi-present),SI/citation-report/
         #     poster/目录页 也从 match 降级为 uncertain(默认);hard_reject→mismatch;开关关→回退 match。──

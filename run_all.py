@@ -723,8 +723,19 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("-f", "--input-file", help="输入清单文件(.txt/.csv/.xlsx;复用 cli 解析)")
     ap.add_argument("-o", "--out", default="out/run_all", help="独立输出根目录 RUNROOT(默认 out/run_all)")
     ap.add_argument("--email", default=os.environ.get("FULLTEXT_EMAIL", ""), help="联系邮箱(Unpaywall 用)")
-    ap.add_argument("--openalex-key", default=os.environ.get("OPENALEX_KEY"),
-                    help="OpenAlex API key(默认取环境变量 OPENALEX_KEY)")
+    # API key 三件套:默认值经 cli._env_first 别名回退(canonical 优先、通用别名兜底、值裁剪空白),
+    # 与核心 CLI 单一真源同口径——否则本机按业界惯例存的 SEMANTIC_SCHOLAR_API_KEY 等 key 在一键正门被静默闲置。
+    from fulltext_fetcher.cli import _env_first
+    ap.add_argument("--openalex-key",
+                    default=_env_first("OPENALEX_KEY", "OPENALEX_API_KEY"),
+                    help="OpenAlex API key(默认取环境变量 OPENALEX_KEY,别名 OPENALEX_API_KEY)")
+    ap.add_argument("--s2-key",
+                    default=_env_first("S2_KEY", "SEMANTIC_SCHOLAR_API_KEY", "S2_API_KEY"),
+                    help="Semantic Scholar API key(默认取环境变量 S2_KEY,"
+                         "别名 SEMANTIC_SCHOLAR_API_KEY / S2_API_KEY;提升 s2 源限额)")
+    ap.add_argument("--core-key",
+                    default=_env_first("CORE_KEY", "CORE_API_KEY"),
+                    help="CORE API key(默认取环境变量 CORE_KEY,别名 CORE_API_KEY;启用 core 源)")
     ap.add_argument("-c", "--concurrency", type=int, default=3, help="并发(默认 3,礼貌真流量)")
     ap.add_argument("--timeout", type=float, default=30.0)
     ap.add_argument("--resume", dest="resume", action="store_true", default=True,
@@ -871,6 +882,8 @@ def run(argv: Optional[List[str]] = None) -> int:
     cfg = Config(
         email=args.email or "anonymous@example.com",
         openalex_key=args.openalex_key,
+        s2_key=args.s2_key,
+        core_key=args.core_key,
         out_dir=fetch_dir,
         naming_template=(args.naming_template or None),
         concurrency=args.concurrency,
@@ -1059,6 +1072,32 @@ def _selftest(bc: Any) -> int:
             os.environ.pop("OPENALEX_KEY", None)
         else:
             os.environ["OPENALEX_KEY"] = prev
+
+    # ⑥b s2_key/core_key 透传 + 环境变量别名回退(经 cli._env_first 单一真源):
+    #    补断点——此前一键正门只收 --openalex-key,S2/CORE key 即使在环境里也被静默闲置。
+    _KEYS66 = ("S2_KEY", "SEMANTIC_SCHOLAR_API_KEY", "S2_API_KEY", "CORE_KEY", "CORE_API_KEY")
+    _saved66 = {k: os.environ.pop(k, None) for k in _KEYS66}
+    try:
+        a_none = build_parser().parse_args(["10.1/x"])
+        assert a_none.s2_key is None and a_none.core_key is None, (a_none.s2_key, a_none.core_key)
+        os.environ["SEMANTIC_SCHOLAR_API_KEY"] = " s2-alias-66 "
+        os.environ["CORE_API_KEY"] = "core-alias-66"
+        a_alias = build_parser().parse_args(["10.1/x"])
+        assert a_alias.s2_key == "s2-alias-66", a_alias.s2_key          # 别名兜底 + 裁剪空白
+        assert a_alias.core_key == "core-alias-66", a_alias.core_key
+        os.environ["S2_KEY"] = "s2-canonical-66"
+        a_canon = build_parser().parse_args(["10.1/x"])
+        assert a_canon.s2_key == "s2-canonical-66", a_canon.s2_key      # canonical 名必须优先
+        a_cli = build_parser().parse_args(["10.1/x", "--s2-key", "s2-cli-66", "--core-key", "core-cli-66"])
+        assert a_cli.s2_key == "s2-cli-66" and a_cli.core_key == "core-cli-66"  # 显式传参压过 env
+        _k66 = _Cfg(s2_key=a_cli.s2_key, core_key=a_cli.core_key)       # Config 透传(同 main 构造口径)
+        assert _k66.s2_key == "s2-cli-66" and _k66.core_key == "core-cli-66"
+    finally:
+        for k, v in _saved66.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
     # ⑦ 逐条明细输出层(任务[可用性]:只读日志即可判断每条 DOI 成败/命中源/失败原因/路径+文件名)
     #    reason_bucket:各类真实 error → 稳定简短桶(仅展示层,不改 coverage 口径/error 原文)
