@@ -160,6 +160,17 @@ class HttpClient:
         self._impersonate_target: str = getattr(config, "impersonate", None) or "chrome"
         self._imp_local = threading.local()
 
+        # ── OpenAlex Content API 多 key 轮换池($1/天预算按 key 独立)────────────
+        # 池 = cfg.openalex_keys(若给)否则退化为 [cfg.openalex_key](单 key,行为与引入前一致)。
+        # _oa_key_idx 单调前进:当前 key 预算耗尽(429+长 Retry-After)即换下一把;全部耗尽才熔断
+        # content.openalex.org。跨线程共享,推进受 _host_lock 保护(防并发双跳)。
+        _pool = [k.strip() for k in (getattr(config, "openalex_keys", None) or []) if k and k.strip()]
+        if not _pool:
+            _single = getattr(config, "openalex_key", None)
+            _pool = [_single] if _single else []
+        self._oa_keys: list = _pool
+        self._oa_key_idx = 0
+
     @staticmethod
     def _resolve_impersonate_flag(cfg: Any) -> bool:
         """impersonate 取回是否启用:cfg.impersonate_http 为真,或 env FTF_IMPERSONATE_HTTP=1。
@@ -203,6 +214,27 @@ class HttpClient:
         return self.session.get(
             url, params=params, headers=headers, timeout=self.cfg.timeout,
             stream=stream, allow_redirects=allow_redirects)
+
+    def _oa_current_key(self) -> Optional[str]:
+        """当前 OpenAlex Content key:轮换池非空 → 池内当前把(全耗尽 → None);
+        池空 → 活读 cfg.openalex_key 单 key 兜底(兼容运行中注入 cfg 的调用方/selftest)。"""
+        with self._host_lock:
+            if self._oa_keys:
+                return self._oa_keys[self._oa_key_idx] if self._oa_key_idx < len(self._oa_keys) else None
+        return getattr(self.cfg, "openalex_key", None)
+
+    def _oa_rotate_key(self, spent_key: str) -> bool:
+        """把预算耗尽的 spent_key 轮换掉:切到下一把 → True;池已用尽/单 key 无可换 → False。
+        CAS 语义:仅当 spent_key 仍是当前把时才前进;另一线程已切过 → 直接 True(不双跳)。"""
+        with self._host_lock:
+            if not self._oa_keys:
+                return False
+            if self._oa_key_idx >= len(self._oa_keys):
+                return False
+            if self._oa_keys[self._oa_key_idx] != spent_key:
+                return True                       # 并发下别的线程已轮换
+            self._oa_key_idx += 1
+            return self._oa_key_idx < len(self._oa_keys)
 
     def set_host_interval(self, host: str, interval: float) -> None:
         """为特定 host 设定更严格的最小间隔(如 arXiv API 要求 3s)。"""
@@ -290,19 +322,22 @@ class HttpClient:
                 # 仅对需机构访问的域名注入会话 Cookie(不外泄给 OA/第三方);调用方显式 headers 优先。
                 headers = {"Cookie": cookie, **(headers or {})}
             url = rewrite_url_for_proxy(url, self.cfg)
-        # OpenAlex Content API 凭据单点注入(openalex_content 源):候选/日志/产物里的 URL 一律
-        # 不带 api_key(防泄密),仅在真正发请求的这一刻对 content.openalex.org 域补上;
-        # 调用方已显式给 api_key(params 或 URL 内)则绝不覆盖。其它域名零影响。
-        if urlparse(url).netloc == "content.openalex.org" and "api_key=" not in url:
-            _oa_key = getattr(self.cfg, "openalex_key", None)
-            if _oa_key and "api_key" not in (params or {}):
-                params = {**(params or {}), "api_key": _oa_key}
+        # OpenAlex Content API 凭据单点注入 + 多 key 轮换(openalex_content 源):候选/日志/产物
+        # 里的 URL 一律不带 api_key(防泄密),仅在真正发请求的这一刻对 content.openalex.org 域补上
+        # 【轮换池当前把】($1/天预算按 key 独立;当前把耗尽即换下一把,全耗尽才熔断该域)。
+        # 调用方已显式给 api_key(params 或 URL 内)则绝不注入/轮换。其它域名零影响。
+        _oa_inject = (urlparse(url).netloc == "content.openalex.org"
+                      and "api_key=" not in url and "api_key" not in (params or {}))
         host = urlparse(url).netloc
         with self._host_lock:
             down = host in self._host_down
         if down:
             return None  # 已熔断,直接跳过
         for attempt in range(self.cfg.max_retries + 1):
+            if _oa_inject:
+                _oak = self._oa_current_key()
+                if _oak:
+                    params = {**(params or {}), "api_key": _oak}
             self._respect_rate(url)
             try:
                 r = self._do_get(
@@ -315,15 +350,21 @@ class HttpClient:
                 if r.status_code in (429, 500, 502, 503, 504):
                     ra = r.headers.get("Retry-After")
                     delay = float(ra) if (ra and ra.isdigit()) else float(2 ** attempt)
-                    # 长 Retry-After(>5min)= 本次运行内重试注定徒劳(典型:OpenAlex Content API
-                    # 日预算耗尽回 429 + Retry-After≈到 UTC 午夜的秒数)。退避上限才 30s,反复重试
-                    # 只会把批量跑的每条 miss 拖慢 `30s×重试数`——直接熔断该 host,快速失败、
-                    # 其余源照常兜底;下次运行(预算重置后)自然恢复。
+                    # 长 Retry-After(>5min)= 本次运行内对当前凭据重试注定徒劳(典型:OpenAlex
+                    # Content API 日预算耗尽回 429 + Retry-After≈到 UTC 午夜的秒数)。退避上限才
+                    # 30s,死磕只会把批量跑的每条 miss 拖慢 `30s×重试数`。处置:轮换池还有下一把
+                    # key → 立即换 key 重试(host 不熔断);无可换 → 熔断该 host,快速失败、其余源
+                    # 照常兜底,预算重置后下次运行自愈。
                     if delay > 300:
+                        r.close()
+                        _spent = (params or {}).get("api_key")
+                        if _oa_inject and _spent and self._oa_rotate_key(_spent):
+                            self.log.warning("OpenAlex key %s… 日预算耗尽(429, Retry-After=%.0fs)"
+                                             "→ 轮换下一把重试", str(_spent)[:6], delay)
+                            continue
                         self.log.warning("HTTP %s %s Retry-After=%.0fs(远超退避上限)→ 本次运行内"
                                          "跳过该 host(如为 API 日预算耗尽,次日自动恢复)",
                                          r.status_code, url, delay)
-                        r.close()
                         with self._host_lock:
                             self._host_down.add(host)
                         return None
@@ -331,6 +372,15 @@ class HttpClient:
                     r.close()
                     time.sleep(min(delay, 30))
                     continue
+                if _oa_inject and r.status_code in (401, 403):
+                    # 池内当前把被拒(撤销/失效/无权限)→ 轮换下一把重试,防一把死 key 卡死整池;
+                    # 无可换(池空/已尽/调用方自带 key)→ 照旧把响应交上层按失败处理。
+                    _spent = (params or {}).get("api_key")
+                    if _spent and self._oa_rotate_key(_spent):
+                        self.log.warning("OpenAlex key %s… 被拒(HTTP %d,疑似失效)→ 轮换下一把重试",
+                                         str(_spent)[:6], r.status_code)
+                        r.close()
+                        continue
                 self._note_ok(host)
                 self._maybe_adapt_rate(host, r)
                 return r
@@ -468,6 +518,42 @@ if __name__ == "__main__":  # 不联网 selftest: python -m fulltext_fetcher.htt
         c6c.session.script[0].headers = {"Retry-After": "2"}
         assert c6c.get("https://api.crossref.org/works").status_code == 200
         assert c6c.session.calls == 2, c6c.session.calls
+
+        # ⑥c OpenAlex Content 多 key 轮换:当前把预算耗尽(429+长 Retry-After)→ 换下一把立即
+        #     重试(host 不熔断、新 key 注入生效);池全耗尽才熔断
+        c6d = _client([_Resp(429), _Resp(200)], max_retries=3)
+        c6d.session.script[0].headers = {"Retry-After": "28394"}
+        c6d._oa_keys = ["K1", "K2"]; c6d._oa_key_idx = 0
+        r6d = c6d.get("https://content.openalex.org/works/W1.pdf")
+        assert r6d is not None and r6d.status_code == 200, r6d
+        assert (c6d.session.last_kw.get("params") or {}).get("api_key") == "K2", \
+            c6d.session.last_kw                      # 轮换后第二把生效
+        assert "content.openalex.org" not in c6d._host_down and c6d._oa_key_idx == 1
+        c6e = _client([_Resp(429)] * 2, max_retries=3)   # 池仅 1 把再耗尽 → 无可换 → 熔断
+        c6e.session.script[0].headers = {"Retry-After": "28394"}
+        c6e._oa_keys = ["K1"]; c6e._oa_key_idx = 0
+        assert c6e.get("https://content.openalex.org/works/W1.pdf") is None
+        assert "content.openalex.org" in c6e._host_down and c6e.session.calls == 1
+        c6f = _client([_Resp(200)])                      # 首次请求即注入池内当前把
+        c6f._oa_keys = ["P1"]; c6f._oa_key_idx = 0
+        c6f.get("https://content.openalex.org/works/W1.pdf")
+        assert (c6f.session.last_kw.get("params") or {}).get("api_key") == "P1", c6f.session.last_kw
+        # ⑥g 死 key(401/403,如被撤销/失效)→ 轮换下一把重试,防一把坏 key 卡死整池
+        c6g = _client([_Resp(403), _Resp(200)], max_retries=3)
+        c6g._oa_keys = ["BAD", "GOOD"]; c6g._oa_key_idx = 0
+        r6g = c6g.get("https://content.openalex.org/works/W1.pdf")
+        assert r6g is not None and r6g.status_code == 200 and c6g._oa_key_idx == 1, r6g
+        assert (c6g.session.last_kw.get("params") or {}).get("api_key") == "GOOD", c6g.session.last_kw
+        # 非 content 域的 401/403 不触发轮换(该逻辑仅限 openalex_content 注入路径)
+        c6h = _client([_Resp(403)], max_retries=3)
+        c6h._oa_keys = ["K1", "K2"]; c6h._oa_key_idx = 0
+        assert c6h.get("https://api.crossref.org/works").status_code == 403 and c6h._oa_key_idx == 0
+        # __init__ 池装配:openalex_keys 优先(裁剪/去空),否则退化单 openalex_key
+        _pc = _Cfg(); _pc.openalex_keys = [" A ", "", "B"]         # type: ignore[attr-defined]
+        assert HttpClient(_pc, _NullLog())._oa_keys == ["A", "B"]
+        _ps = _Cfg(); _ps.openalex_key = "SOLO"                    # type: ignore[attr-defined]
+        assert HttpClient(_ps, _NullLog())._oa_keys == ["SOLO"]
+        assert HttpClient(_Cfg(), _NullLog())._oa_keys == []
 
         # ⑦ 首次即成功 → 单次调用、host 记 ok
         c7 = _client([_Resp(200)])

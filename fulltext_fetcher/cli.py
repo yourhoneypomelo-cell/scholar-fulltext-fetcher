@@ -141,6 +141,14 @@ def _read_xlsx(path: str) -> List[str]:
     return _extract_from_rows(rows)
 
 
+def _split_keys(raw: str | None) -> List[str]:
+    """把多 key 串(逗号/分号/空白分隔,容忍粘贴的换行与多余分隔符)拆成去空白的 key 列表。"""
+    if not raw:
+        return []
+    import re
+    return [t for t in re.split(r"[,;\s]+", raw) if t]
+
+
 def _env_first(*names: str) -> str | None:
     """按顺序取第一个非空环境变量值(canonical 名优先,常见通用别名兜底);全空 → None。
     动因:本机/CI 常按业界通用惯例存 key(如 SEMANTIC_SCHOLAR_API_KEY / OPENALEX_API_KEY),
@@ -195,6 +203,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--openalex-key",
                    default=_env_first("OPENALEX_KEY", "OPENALEX_API_KEY"),
                    help="OpenAlex API key(默认取环境变量 OPENALEX_KEY,别名 OPENALEX_API_KEY)")
+    p.add_argument("--openalex-keys",
+                   default=_env_first("OPENALEX_KEYS", "OPENALEX_API_KEYS"),
+                   help="OpenAlex 多 key 轮换池(逗号/分号/空白分隔):Content API 的 $1/天预算按 "
+                        "key 独立,N 把 ≈ N×100 篇缓存 PDF/日;当前把耗尽自动换下一把。"
+                        "(默认取环境变量 OPENALEX_KEYS,别名 OPENALEX_API_KEYS)")
     p.add_argument("--s2-key",
                    default=_env_first("S2_KEY", "SEMANTIC_SCHOLAR_API_KEY", "S2_API_KEY"),
                    help="Semantic Scholar API key(默认取环境变量 S2_KEY,"
@@ -264,9 +277,12 @@ def main(argv: List[str] | None = None) -> int:
               '  python -m fulltext_fetcher -f dois.txt --email you@uni.edu', file=sys.stderr)
         return 2
 
+    _oa_pool = _split_keys(args.openalex_keys)
     cfg = Config(
         email=args.email or "anonymous@example.com",
-        openalex_key=args.openalex_key,
+        # 单 key 未给而池非空 → 用池首把兜底(works API 查询与 openalex_content 源门槛共用)
+        openalex_key=(args.openalex_key or (_oa_pool[0] if _oa_pool else None)),
+        openalex_keys=_oa_pool,
         s2_key=args.s2_key,
         core_key=args.core_key,
         snapshot_db=args.snapshot_db,
@@ -478,7 +494,8 @@ def _selftest() -> int:
     # ⑨ API key 环境变量别名回退(_env_first):canonical 名优先、通用别名兜底、值裁剪空白。
     #    覆盖本机实况:key 存成 SEMANTIC_SCHOLAR_API_KEY / OPENALEX_API_KEY 而非项目 canonical 名。
     _KEY_ENVS = ("S2_KEY", "SEMANTIC_SCHOLAR_API_KEY", "S2_API_KEY",
-                 "OPENALEX_KEY", "OPENALEX_API_KEY", "CORE_KEY", "CORE_API_KEY")
+                 "OPENALEX_KEY", "OPENALEX_API_KEY", "OPENALEX_KEYS", "OPENALEX_API_KEYS",
+                 "CORE_KEY", "CORE_API_KEY")
     _saved_keys = {k: os.environ.pop(k, None) for k in _KEY_ENVS}
     try:
         assert _env_first("S2_KEY", "SEMANTIC_SCHOLAR_API_KEY") is None      # 全空 → None
@@ -496,6 +513,13 @@ def _selftest() -> int:
         assert build_parser().parse_args(["10.1/x"]).openalex_key == "oa-alias"
         os.environ["CORE_API_KEY"] = "core-alias"
         assert build_parser().parse_args(["10.1/x"]).core_key == "core-alias"
+        # 多 key 轮换池:OPENALEX_API_KEYS 别名兜底 + _split_keys 容忍逗号/分号/空白混合分隔
+        os.environ["OPENALEX_API_KEYS"] = "k1, k2;k3\n k4"
+        assert build_parser().parse_args(["10.1/x"]).openalex_keys == "k1, k2;k3\n k4"
+        assert _split_keys("k1, k2;k3\n k4") == ["k1", "k2", "k3", "k4"]
+        os.environ["OPENALEX_KEYS"] = "c1,c2"       # canonical 名优先于别名
+        assert _split_keys(build_parser().parse_args(["10.1/x"]).openalex_keys) == ["c1", "c2"]
+        assert _split_keys(None) == [] and _split_keys("  ,; ") == []
     finally:
         for k, v in _saved_keys.items():
             if v is None:

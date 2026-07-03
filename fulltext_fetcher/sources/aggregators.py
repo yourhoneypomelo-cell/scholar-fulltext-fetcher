@@ -88,6 +88,9 @@ class OpenAlexContent(BaseSource):
 
     def find_candidates(self, paper: Paper, ctx: SourceContext) -> List[PdfCandidate]:
         key = getattr(ctx.cfg, "openalex_key", None)
+        if not key:            # 单 key 未配 → 取多 key 轮换池首把(下载时由 HttpClient 按池轮换)
+            pool = [k for k in (getattr(ctx.cfg, "openalex_keys", None) or []) if k]
+            key = pool[0] if pool else None
         if not key:
             return []          # 该 API 必须带 key;未配置 → 本源静默让位(零请求)
         data = ctx.client.get_json(
@@ -691,5 +694,10 @@ if __name__ == "__main__":  # 纯函数 selftest(不联网): python -m fulltext_
         _P, _OCtx({"id": "https://openalex.org/W1", "has_content": {"pdf": True}}, _KeyCfg()))) == 1
     assert OpenAlexContent().find_candidates(_P, _OCtx(None, _KeyCfg())) == []
     assert OpenAlexContent().find_candidates(_P, _OCtx({"id": "junk"}, _KeyCfg())) == []
+    # ⑥ 仅配多 key 轮换池(单 openalex_key 为空)→ 同样过门槛(取池首把查 works)
+    class _PoolCfg(_OACfg):
+        openalex_keys = ["PK1", "PK2"]
+    _c6 = _OCtx({"id": "https://openalex.org/W1"}, _PoolCfg())
+    assert len(OpenAlexContent().find_candidates(_P, _c6)) == 1 and _c6.client.calls == 1
 
     print("AGGREGATORS_OK")

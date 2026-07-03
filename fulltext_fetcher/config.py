@@ -43,6 +43,11 @@ class Config:
     # 身份/凭据(均为可选,但强烈建议填真实 email)
     email: str = "anonymous@example.com"
     openalex_key: Optional[str] = None
+    # OpenAlex 多 key 轮换池(Content API 专用;$1/天预算按 key 独立):给 N 把 → 缓存 PDF 日额度
+    # ≈ N×100 篇。当前 key 预算耗尽(429+长 Retry-After)即自动换下一把,全耗尽才熔断该域。
+    # CLI 经 --openalex-keys 或环境变量 OPENALEX_KEYS / OPENALEX_API_KEYS(逗号/分号/空白分隔)。
+    # 空(默认)→ 退化为单 openalex_key,行为与引入前一致。
+    openalex_keys: List[str] = field(default_factory=list)
     s2_key: Optional[str] = None
     core_key: Optional[str] = None
 
