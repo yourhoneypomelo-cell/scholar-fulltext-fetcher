@@ -876,6 +876,37 @@ def _import_route_b_engine() -> Tuple[Any, Any, Optional[str]]:
     return None, None, None
 
 
+def _route_b_proxy() -> Optional[str]:
+    """Path6(-146):route-B 浏览器出口住宅/移动代理(env FTF_ROUTE_B_PROXY);未设 → None(直连)。
+
+    形如 ``http://host:port`` / ``socks5://host:port``。⚠️ 认证代理(``user:pass@host:port``):Chrome
+    ``--proxy-server`` 不接受内联凭据,且 route-B 过 CF 期【绝不能提前 enable Fetch 域】(见 -154)做 CDP
+    代理鉴权 → 会废掉过盾。故认证代理请改用 **IP 白名单授权**,或本机起**非认证转发端点**(localhost:port)
+    指向上游认证代理,再把该本地端点填进本变量。"""
+    u = (os.environ.get("FTF_ROUTE_B_PROXY") or "").strip()
+    return u or None
+
+
+def _proxy_server_arg(proxy_url: str) -> Optional[str]:
+    """把代理 URL 归一为 Chrome ``--proxy-server`` 值:补默认 scheme、**剥离内联 user:pass**(Chrome 不支持)。
+
+    ``http://u:p@1.2.3.4:8080`` → ``http://1.2.3.4:8080``;``1.2.3.4:8080`` → ``http://1.2.3.4:8080``;
+    ``socks5://1.2.3.4:1080`` 原样。无 host / 畸形 → None。纯解析、离线可测、绝不抛。
+    """
+    if not proxy_url:
+        return None
+    try:
+        p = urlparse(proxy_url if "://" in proxy_url else "http://" + proxy_url)
+        scheme = (p.scheme or "http").lower()
+        host = (p.hostname or "").strip()
+        if not host:
+            return None
+        port = f":{p.port}" if p.port else ""
+        return f"{scheme}://{host}{port}"
+    except Exception:  # noqa: BLE001 - 畸形 URL → 不配代理(直连)
+        return None
+
+
 def _nodriver_capture_fn(headless: bool = False,
                          pdf_url_fallbacks: Optional[List[str]] = None,
                          injection_plan: Any = None) -> Optional[CaptureFn]:
@@ -916,6 +947,9 @@ def _nodriver_capture_fn(headless: bool = False,
             _udd = _route_b_user_data_dir()      # (-165 P4)持久档案 → CF/Turnstile 视作回访人类(默认 None)
             if _udd:
                 _start_kw["user_data_dir"] = _udd
+            _proxy_arg = _proxy_server_arg(_route_b_proxy() or "")   # (-146 P6)住宅代理出口(默认无)
+            if _proxy_arg:
+                _start_kw["browser_args"].append(f"--proxy-server={_proxy_arg}")
             browser = await nd.start(**_start_kw)
             # how: 哪条子路径最终拿到字节——"b1"=页内 fetch(方法B,同源同 JA3),
             # "b2"=导航 PDF 直链后 Network 域抓(方法A,处理跨域/viewer)。供冒烟报 B1/B2(-142)。
@@ -1500,6 +1534,22 @@ def _selftest_bytes() -> None:
                 os.environ.pop(_k, None)
             else:
                 os.environ[_k] = _v
+
+    # 0e) P6 住宅代理归一(-146,全离线):env 解析 + Chrome --proxy-server 值(剥离内联凭据)
+    _saved_proxy = os.environ.pop("FTF_ROUTE_B_PROXY", None)
+    try:
+        assert _route_b_proxy() is None
+        os.environ["FTF_ROUTE_B_PROXY"] = "http://1.2.3.4:8080"
+        assert _route_b_proxy() == "http://1.2.3.4:8080"
+    finally:
+        os.environ.pop("FTF_ROUTE_B_PROXY", None)
+        if _saved_proxy is not None:
+            os.environ["FTF_ROUTE_B_PROXY"] = _saved_proxy
+    assert _proxy_server_arg("http://user:pass@1.2.3.4:8080") == "http://1.2.3.4:8080"   # 剥离凭据
+    assert _proxy_server_arg("socks5://1.2.3.4:1080") == "socks5://1.2.3.4:1080"
+    assert _proxy_server_arg("1.2.3.4:8080") == "http://1.2.3.4:8080"                    # 补默认 scheme
+    assert _proxy_server_arg("") is None
+    assert _proxy_server_arg("http://") is None                                          # 无 host → None
 
     # 0b) A5 route-B 注入:ezproxy 改写 + inject hook(离线 mock tab)
     from fulltext_fetcher.institutional.route_b_bridge import BrowserCookieSpec, RouteBInjectionPlan
