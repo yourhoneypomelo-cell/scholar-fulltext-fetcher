@@ -778,6 +778,104 @@ def _solve_turnstile_token(site_key: str, page_url: str) -> Optional[str]:
     return tok or None
 
 
+# ── 三条 Turnstile 攻克路(-146:用户「三条路都配置,后续看哪条最有效」)──────────────────
+# 全部独立 env-gated、默认关(default 行为逐字节不变),便于 A/B 对照哪条通过率最高:
+#   Path1 免费:nodriver 原生 verify_cf()(浏览器内 opencv 点选 checkbox)—— FTF_ROUTE_B_VERIFY_CF=1
+#   Path2 自托管免费:EzSolver / Turnstile-Solver HTTP API(真浏览器出 token)—— FTF_TURNSTILE_SOLVER_URL=<base>
+#   Path3 引擎:nodriver → zendriver(修 CDP schema 漂移 / Chrome146 cookie / headless CF)—— FTF_ROUTE_B_ENGINE=zendriver
+#   (+ 付费兜底 capsolver/2captcha:FTF_CAPTCHA_ENABLED=1 + PROVIDER + KEY,前已接)
+def _route_b_verify_cf_enabled() -> bool:
+    """Path1:是否启用 nodriver 原生 verify_cf() 免费点选 Turnstile(env,默认关)。"""
+    return _env_true("FTF_ROUTE_B_VERIFY_CF")
+
+
+def _ezsolver_url() -> Optional[str]:
+    """Path2:自托管 Turnstile 求解器(EzSolver/Turnstile-Solver)base URL;未设→None。"""
+    u = (os.environ.get("FTF_TURNSTILE_SOLVER_URL") or "").strip()
+    return u.rstrip("/") if u else None
+
+
+def _solve_turnstile_via_ezsolver(site_key: str, page_url: str) -> Optional[str]:
+    """Path2:调自托管 Turnstile 求解器取 token。兼容两类常见 OSS API:
+    ① 同步:``GET {base}/turnstile?url=&sitekey=`` 直接返回 ``{token|value}``(EzSolver 类);
+    ② 异步:先返回 ``{task_id}``,再轮询 ``GET {base}/result?id=`` 到 ``{value|token}``(Theyka Turnstile-Solver 类)。
+    纯标准库 urllib,零新依赖;未设 URL / 任何异常 → None(绝不抛、绝不拖垮流水线)。"""
+    base = _ezsolver_url()
+    if not base or not site_key:
+        return None
+    import urllib.parse
+    import urllib.request
+
+    def _get_json(url: str, timeout: float) -> Dict[str, Any]:
+        req = urllib.request.Request(url, headers={"Accept": "application/json",
+                                                   "User-Agent": "fulltext_fetcher/route-b"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - 本地自托管求解器
+            return json.loads(resp.read().decode("utf-8", "ignore") or "{}")
+
+    def _pick_token(d: Dict[str, Any]) -> Optional[str]:
+        for k in ("token", "value", "solution", "gRecaptchaResponse"):
+            v = d.get(k)
+            if isinstance(v, str) and v and v.upper() != "CAPTCHA_NOT_READY":
+                return v
+        inner = d.get("result") if isinstance(d.get("result"), dict) else None
+        return _pick_token(inner) if inner else None
+
+    try:
+        q = urllib.parse.urlencode({"url": page_url, "sitekey": site_key})
+        first = _get_json(f"{base}/turnstile?{q}", 30.0)
+        tok = _pick_token(first)
+        if tok:
+            return tok
+        task_id = first.get("task_id") or first.get("id") or first.get("taskId")
+        if not task_id:
+            return None
+        deadline = time.monotonic() + 120.0
+        while time.monotonic() < deadline:
+            time.sleep(3.0)
+            r = _get_json(f"{base}/result?id={urllib.parse.quote(str(task_id))}", 20.0)
+            tok = _pick_token(r)
+            if tok:
+                return tok
+            if str(r.get("status", "")).lower() in ("failed", "error"):
+                return None
+        return None
+    except Exception:  # noqa: BLE001 - 求解器不可达/超时/坏 JSON → 优雅降级
+        return None
+
+
+def _turnstile_solving_available() -> bool:
+    """是否有任一 token 求解通道可用:自托管 EzSolver(Path2) 或 付费 capsolver/2captcha。"""
+    return bool(_ezsolver_url() or _captcha_solving_enabled())
+
+
+def _acquire_turnstile_token(site_key: str, page_url: str) -> Optional[str]:
+    """token 求解编排:先 EzSolver 自托管(免费)→ 再 capsolver/2captcha(付费)。默认全关→None。"""
+    return _solve_turnstile_via_ezsolver(site_key, page_url) or _solve_turnstile_token(site_key, page_url)
+
+
+def _route_b_engine() -> str:
+    """Path3:route-B 浏览器引擎(env FTF_ROUTE_B_ENGINE);默认 nodriver。仅 nodriver|zendriver 合法。"""
+    e = (os.environ.get("FTF_ROUTE_B_ENGINE") or "").strip().lower()
+    return e if e in ("nodriver", "zendriver") else "nodriver"
+
+
+def _import_route_b_engine() -> Tuple[Any, Any, Optional[str]]:
+    """按 FTF_ROUTE_B_ENGINE 导入引擎并返回 (module, cdp, name);首选失败回退另一个;都无 → (None,None,None)。
+
+    zendriver 是 nodriver 的活跃分叉,API/CDP 镜像(nd.start / from <mod> import cdp),故可参数化切换。绝不抛。
+    """
+    pref = _route_b_engine()
+    order = [pref] + [x for x in ("nodriver", "zendriver") if x != pref]
+    for name in order:
+        try:
+            mod = __import__(name)
+            cdp = __import__(name + ".cdp", fromlist=["cdp"])
+            return mod, cdp, name
+        except Exception:  # noqa: BLE001 - 未装该引擎 → 试下一个
+            continue
+    return None, None, None
+
+
 def _nodriver_capture_fn(headless: bool = False,
                          pdf_url_fallbacks: Optional[List[str]] = None,
                          injection_plan: Any = None) -> Optional[CaptureFn]:
@@ -799,15 +897,15 @@ def _nodriver_capture_fn(headless: bool = False,
     """
     _fallbacks = [u for u in (pdf_url_fallbacks or []) if u]
     _plan = injection_plan
-    try:
-        import nodriver  # noqa: F401
-    except ImportError:
+    # Path3(-146):按 FTF_ROUTE_B_ENGINE 选 nodriver / zendriver(API 镜像);都没装 → None(默认关,优雅降级)。
+    _eng_mod, _eng_cdp, _eng_name = _import_route_b_engine()
+    if _eng_mod is None:
         return None
     import asyncio
 
     def _capture(article_url: str, timeout: float) -> Tuple[Optional[bytes], str]:
-        import nodriver as nd
-        from nodriver import cdp
+        nd = _eng_mod
+        cdp = _eng_cdp
 
         async def _go() -> Tuple[Optional[bytes], str]:
             _hl = _resolve_headless(headless)
@@ -1000,12 +1098,24 @@ def _nodriver_capture_fn(headless: bool = False,
                         note = "blocked:rsc-governor-softblock" if soft else "blocked:rsc-governor"
                         return None, note
                     blocked_by_text = any(s in txt for s in _BLOCK_SIGNALS)
-                    # (-146)CF Turnstile 硬解题兜底(gated:env 打码三件套齐备才走;默认关→整段短路,
-                    # route-B 行为逐字节不变)。仅在【被质询文案挡住】且【本篇尚未尝试过】时抓一次完整 HTML
-                    # 找 Turnstile sitekey → 打码平台出 token → 注入页面 → 下一轮重判是否已过。真浏览器多数能
-                    # 自动过 Turnstile,此为硬 Turnstile / 无头 / 被盯上时的兜底;RSC governor 坏码走 _looks_governor
-                    # (不到这里),绝不对坏 reCAPTCHA 打码。
-                    if blocked_by_text and _captcha_solving_enabled() and not got.get("ts_tried"):
+                    # (-146 Path1)免费:nodriver/zendriver 原生 verify_cf() 浏览器内点选 Turnstile checkbox。
+                    # env FTF_ROUTE_B_VERIFY_CF=1 才走;默认关→短路。真浏览器多数能自动过,此为交互式 checkbox 兜底。
+                    if blocked_by_text and _route_b_verify_cf_enabled() and not got.get("vcf_tried"):
+                        got["vcf_tried"] = True
+                        for _m in ("verify_cf", "cf_verify"):
+                            _vfn = getattr(tab, _m, None)
+                            if _vfn is not None:
+                                try:
+                                    await asyncio.wait_for(_vfn(), timeout=20.0)
+                                except Exception:  # noqa: BLE001 - 该引擎版本无此法/超时 → 忽略
+                                    pass
+                                await tab.sleep(2.0)
+                                break
+                        continue
+                    # (-146 Path2/付费)token 求解:抓 HTML 找 Turnstile sitekey → EzSolver(自托管免费)
+                    # → capsolver/2captcha(付费)出 token → 注入页面 → 下一轮重判。gated:任一通道可用才走;
+                    # 默认全关→短路,route-B 行为逐字节不变。RSC governor 坏码走 _looks_governor(不到这),绝不打码。
+                    if blocked_by_text and _turnstile_solving_available() and not got.get("ts_tried"):
                         got["ts_tried"] = True
                         try:
                             _full_html = await asyncio.wait_for(tab.get_content(), timeout=8.0)
@@ -1014,7 +1124,7 @@ def _nodriver_capture_fn(headless: bool = False,
                         _sk = _extract_turnstile_sitekey(_full_html)
                         if _sk:
                             _cur = (await _eval_str("location.href", t=6.0)) or article_url
-                            _tok = _solve_turnstile_token(_sk, _cur)
+                            _tok = _acquire_turnstile_token(_sk, _cur)
                             if _tok:
                                 await _eval_str(_inject_turnstile_token_js(_tok), t=8.0)
                                 await tab.sleep(3.0)
@@ -1354,6 +1464,42 @@ def _selftest_bytes() -> None:
         os.environ.pop("FTF_ROUTE_B_USER_DATA_DIR", None)
         if _saved_udd is not None:
             os.environ["FTF_ROUTE_B_USER_DATA_DIR"] = _saved_udd
+
+    # 0d) 三条 Turnstile 攻克路(-146)gating(全离线、默认关):verify_cf / EzSolver / zendriver
+    _saved_env3 = {k: os.environ.get(k) for k in (
+        "FTF_ROUTE_B_VERIFY_CF", "FTF_TURNSTILE_SOLVER_URL", "FTF_ROUTE_B_ENGINE",
+        "FTF_CAPTCHA_ENABLED", "FTF_CAPTCHA_PROVIDER", "FTF_CAPTCHA_KEY")}
+    for _k in _saved_env3:
+        os.environ.pop(_k, None)
+    try:
+        # Path1 verify_cf 开关(默认关)
+        assert _route_b_verify_cf_enabled() is False
+        os.environ["FTF_ROUTE_B_VERIFY_CF"] = "1"
+        assert _route_b_verify_cf_enabled() is True
+        os.environ.pop("FTF_ROUTE_B_VERIFY_CF", None)
+        # Path2 EzSolver URL 解析 + 求解通道可用性(默认关→短路,不联网)
+        assert _ezsolver_url() is None
+        assert _turnstile_solving_available() is False
+        assert _acquire_turnstile_token("0xk", "https://pubs.rsc.org/a") is None
+        os.environ["FTF_TURNSTILE_SOLVER_URL"] = "http://localhost:5033/"
+        assert _ezsolver_url() == "http://localhost:5033"
+        assert _turnstile_solving_available() is True
+        os.environ.pop("FTF_TURNSTILE_SOLVER_URL", None)
+        # Path3 引擎选择(默认 nodriver;非法值回退)+ 导入不抛、名字合法
+        assert _route_b_engine() == "nodriver"
+        os.environ["FTF_ROUTE_B_ENGINE"] = "zendriver"
+        assert _route_b_engine() == "zendriver"
+        os.environ["FTF_ROUTE_B_ENGINE"] = "garbage"
+        assert _route_b_engine() == "nodriver"
+        os.environ.pop("FTF_ROUTE_B_ENGINE", None)
+        _em, _ec, _en = _import_route_b_engine()
+        assert _en in (None, "nodriver", "zendriver"), _en
+    finally:
+        for _k, _v in _saved_env3.items():
+            if _v is None:
+                os.environ.pop(_k, None)
+            else:
+                os.environ[_k] = _v
 
     # 0b) A5 route-B 注入:ezproxy 改写 + inject hook(离线 mock tab)
     from fulltext_fetcher.institutional.route_b_bridge import BrowserCookieSpec, RouteBInjectionPlan
