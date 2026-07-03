@@ -424,6 +424,28 @@ def _print_page(payload: Dict[str, Any]) -> str:
 # ── QC 虚高硬告警(审计-147 G2)────────────────────────────────────────────────
 # 弱告警("[缺失]"/内嵌一行)易被忽略。这里把「净成功率是否可能虚高」判定成一个显式布尔 + 原因,
 # 供一页总结顶部打醒目 WARN 横幅、并落进 run_all_summary.json 的 qc.warn(机器可读)。纯展示层。
+def _nonempty_runroot_warning(runroot: str) -> Optional[str]:
+    """RUNROOT 已有旧产出时的重跑告警文案;洁净目录 → None(E2E-160 验收观察项①)。
+
+    背景:同一 `-o` 反复 `--no-resume` 真跑会累积 `_2/_3…` 同名副本(pipeline 对重名 PDF 追后缀,
+    coverage 按 DOI 去重仍准,但交付夹会有孪生文件、且旧 run 的 metadata 与新 run 混在一起)。
+    只告警不阻断:续跑(--resume 同目录补漏)是合法用法,不能一刀切拒绝。"""
+    fetch_dir = os.path.join(runroot, "fetch")
+    meta = os.path.join(fetch_dir, "metadata.jsonl")
+    pdf_dir = os.path.join(fetch_dir, "pdfs")
+    n_pdfs = 0
+    if os.path.isdir(pdf_dir):
+        try:
+            n_pdfs = sum(1 for n in os.listdir(pdf_dir) if n.lower().endswith(".pdf"))
+        except OSError:
+            n_pdfs = 0
+    if not (os.path.isfile(meta) or n_pdfs):
+        return None
+    return ("RUNROOT %s 已有历史产出(metadata%s + %d 个 PDF):--no-resume 重跑会重下并把同名 PDF "
+            "追 _2/_3 副本(coverage 按 DOI 去重不受影响)。交付/演示请换全新 -o;补漏续跑请用 --resume。"
+            % (runroot, "存在" if os.path.isfile(meta) else "缺失", n_pdfs))
+
+
 def _qc_warn_status(use_qc: bool, hard_missing: bool, soft_missing: bool) -> Tuple[bool, str]:
     """净成功率是否有「虚高」风险 + 原因:
     - 未启用 QC(--no-qc):盲口径,可能把 websearch 抓错论文计为成功 → 必 warn。
@@ -848,7 +870,10 @@ def run(argv: Optional[List[str]] = None) -> int:
 
     runroot = args.out
     fetch_dir = os.path.join(runroot, "fetch")
+    _rr_warn = _nonempty_runroot_warning(runroot)   # 须在 makedirs 前探测(E2E-160 观察项①)
     os.makedirs(runroot, exist_ok=True)
+    if _rr_warn:
+        print("run_all: [WARN] %s" % _rr_warn)
 
     # ⓪ QC 黑名单路径(可信口径关键:剔 websearch「抓错论文」假成功;文件在全局 coverage-root)
     use_qc = not args.no_qc
@@ -1384,6 +1409,22 @@ def _selftest(bc: Any) -> int:
         except SystemExit as _e8:
             assert "不存在" in str(_e8), str(_e8)
         assert run(["-f", _nope]) == 2, "run() 对不存在输入文件应 return 2(非裸 traceback)"
+
+    # ⑨ 非空 RUNROOT 重跑告警(E2E-160 验收观察项①):洁净/不存在 → None;有旧 metadata 或 PDF →
+    #    告警文案(含副本机理与 --resume 指引);只警不阻断(续跑合法)。
+    import tempfile as _tf9
+    with _tf9.TemporaryDirectory() as _d9:
+        _rr9 = os.path.join(_d9, "RR")
+        assert _nonempty_runroot_warning(_rr9) is None, "不存在的 RUNROOT 应无告警"
+        os.makedirs(os.path.join(_rr9, "fetch", "pdfs"))
+        assert _nonempty_runroot_warning(_rr9) is None, "空 fetch/pdfs 应无告警"
+        open(os.path.join(_rr9, "fetch", "pdfs", "x.pdf"), "w").close()
+        _w9 = _nonempty_runroot_warning(_rr9)
+        assert _w9 and "1 个 PDF" in _w9 and "--resume" in _w9, _w9
+        os.remove(os.path.join(_rr9, "fetch", "pdfs", "x.pdf"))
+        open(os.path.join(_rr9, "fetch", "metadata.jsonl"), "w").close()
+        _w9b = _nonempty_runroot_warning(_rr9)
+        assert _w9b and "metadata存在" in _w9b and "0 个 PDF" in _w9b, _w9b
 
     print("RUN_ALL_OK")
     return 0
