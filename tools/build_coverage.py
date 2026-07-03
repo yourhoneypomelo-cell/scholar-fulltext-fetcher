@@ -228,6 +228,20 @@ def pdf_basenames(dir_full: str) -> Set[str]:
     return {n for n in os.listdir(d) if os.path.isfile(os.path.join(d, n))}
 
 
+def rejected_basenames(dir_full: str) -> Set[str]:
+    """某批 rejected/ 目录里的全部文件名(方案C:**仅供 qc_allow 白名单命中项**额外认盘)。
+
+    背景(writeback149 根因):cleanup 曾把内容QC 复核后翻案为「真正文」的 gold PDF 误判并物理
+    移入 <batch>/rejected/;而 build_coverage 只认 <batch>/pdfs/,导致 whitelist(只解黑名单、
+    不凭空造成功)救不回,只能靠人工把 46 份文件 rejected/→pdfs/「解隔离」。方案C 让 whitelist
+    命中项额外去 rejected/ 认 PDF,消灭该类手工步骤;非白名单 DOI 一律不认 rejected/(那里都是
+    已确证的错文,只有经逐条内容QC 翻案进 allow 清单者才有资格复活),且照样过回写开卷门。"""
+    d = os.path.join(dir_full, "rejected")
+    if not os.path.isdir(d):
+        return set()
+    return {n for n in os.listdir(d) if os.path.isfile(os.path.join(d, n))}
+
+
 def is_core_batch(name: str) -> bool:
     """三个「主语料批」:batch4 五分片 + batch6 + batch7。对它们的**逐批(非去重)求和**即审计
     口径 866/1213(把 batch7 的 213 输入当独立批、其 108 成功含与 batch6 重复的部分)。
@@ -408,8 +422,11 @@ def build(out_root: str,
 
     qc_allow(白名单/免死金牌):下游**逐条内容QC**已核实为「真正文正确」的 DOI,即便命中审计黑名单
     (hard/union)也**不剔除**(用于纠正 DOI 键黑名单的假阳:同一 DOI 早前抓错、这次经新路线抓对了)。
-    仅「解除拦截」,不凭空造成功——DOI 若本就不是落盘真成功,列入白名单也无效。命中者在 records 标
-    qc=allow_override,summary.qc.allow_override 计数。优先级最高(白名单 > 黑名单)。
+    「解除拦截」之外唯一的例外是方案C:白名单命中项若 pdfs/ 无文件、但同名文件在 <batch>/rejected/
+    (cleanup 误隔离的翻案 gold),则以 rejected/ 里的文件认盘复活(pdf_in_rejected 留证、照过回写
+    开卷门);除此之外不凭空造成功——DOI 若盘上(pdfs/ 与 rejected/)都没有文件,列入白名单也无效。
+    非白名单 DOI 永不认 rejected/。命中者在 records 标 qc=allow_override,summary.qc.allow_override
+    计数。优先级最高(白名单 > 黑名单)。
 
     include_nested/exclude_substrings/extra_dirs 透传 list_batch_dirs(默认递归收录嵌套产出、
     剔除 demo/smoke 夹具);见其 docstring。"""
@@ -427,6 +444,8 @@ def build(out_root: str,
         full = os.path.join(out_root, name)
         recs = read_jsonl(os.path.join(full, "metadata.jsonl"))
         pdfs = pdf_basenames(full)
+        # 方案C:仅当有白名单时才扫 rejected/(零 allow → 行为与旧版逐字节一致)
+        rejected = rejected_basenames(full) if qc_allow else set()
         meta_succ = 0
         real_succ = 0
         dir_dois: Set[str] = set()          # 本批去重后的唯一 DOI(≈输入数)
@@ -439,6 +458,9 @@ def build(out_root: str,
             claimed = bool(r.get("success"))
             bn = basename_of(r.get("pdf_path"))
             real = bool(claimed and bn and bn in pdfs)
+            # 方案C:白名单命中 + pdfs/ 无 + rejected/ 有 → 以 rejected/ 里的文件认盘(允许复活)。
+            # 不计入 per_dir 的 real 统计(那是「原始落盘」审计口径,不掺 QC 态),只影响 cov 记录。
+            rescued = bool((not real) and claimed and bn and doi in qc_allow and bn in rejected)
             if claimed:
                 meta_succ += 1
             if real:
@@ -470,13 +492,29 @@ def build(out_root: str,
                 e.setdefault("_cands", []).append({
                     "pb": pb, "source": r.get("source_used"),
                     "pdf_path": (r.get("pdf_path") or "").replace("\\", "/"), "batch": name})
-                if e["status"] != "success" or pb > int(e["pdf_bytes"] or 0):
+                # pdfs/ 实盘永远压过方案C 的 rejected/ 复活指针(哪怕 bytes 更小)
+                if e["status"] != "success" or e.get("pdf_in_rejected") or pb > int(e["pdf_bytes"] or 0):
                     e["status"] = "success"
                     e["source"] = r.get("source_used")
                     e["pdf_path"] = (r.get("pdf_path") or "").replace("\\", "/")
                     e["pdf_bytes"] = pb
                     e["batch"] = name
                     e["error"] = None
+                    e.pop("pdf_in_rejected", None)
+            elif rescued:
+                # 方案C:白名单命中项以 <batch>/rejected/<bn> 认盘复活(pdf_path 指向真实文件,
+                # 供回写开卷门直接开卷复验;记 pdf_in_rejected 留证)。不与 pdfs/ 实盘竞争指针、
+                # 不进 _cands(dedup 重选只在 pdfs/ 实盘候选间进行)。
+                pb = int(r.get("pdf_bytes") or 0)
+                if e["status"] != "success" or (e.get("pdf_in_rejected") and pb > int(e["pdf_bytes"] or 0)):
+                    e["status"] = "success"
+                    e["source"] = r.get("source_used")
+                    e["pdf_path"] = "/".join((out_root.replace("\\", "/").rstrip("/"),
+                                              name, "rejected", bn))
+                    e["pdf_bytes"] = pb
+                    e["batch"] = name
+                    e["error"] = None
+                    e["pdf_in_rejected"] = True
             else:
                 if claimed:  # 声称成功却盘上无文件:标记(可复下),不计成功
                     e["claimed_success_but_no_pdf"] = True
@@ -551,6 +589,7 @@ def build(out_root: str,
                 r["pdf_bytes"] = 0
                 r["error"] = "allow_revoked_openbook:wrong-paper(no-expected-doi,no-title-match)"
                 r["batch"] = None
+                r.pop("pdf_in_rejected", None)     # 方案C 复活被吊销:证据留在 qc_rejected_pdf_path
                 n_allow_revoked += 1
                 continue
             r["qc"] = "allow_override"             # 确为落盘真成功(开卷验过/无法判定):标记留证、免剔除
@@ -579,6 +618,7 @@ def build(out_root: str,
     by_source = Counter(r["source"] or "?" for r in success)
     by_batch = Counter(r["batch"] or "?" for r in success)
     claimed_no_pdf = [r["doi"] for r in miss if r["claimed_success_but_no_pdf"]]
+    n_allow_rescued = sum(1 for r in success if r.get("pdf_in_rejected"))  # 方案C 复活且过门存活者
     total = len(records)
 
     # 交叉核对:逐批(非去重)求和口径。core = 三主语料批。以 metadata 成功求和(cleanup 不改 metadata)
@@ -607,13 +647,15 @@ def build(out_root: str,
             "rejected_total": rej_hard + rej_soft,
             "allow_override": n_allow_override,
             "allow_revoked_openbook": n_allow_revoked,
+            "allow_rescued_from_rejected": n_allow_rescued,
             "success_after_qc": len(success),
             "success_rate_after_qc": round(len(success) / total, 4) if total else 0.0,
             "note": (
                 f"消费审计 QC 黑名单:原始去重成功 {success_before_qc} 剔除抓错论文 "
                 f"{rej_hard + rej_soft}(硬黑 {rej_hard} + 软黑 {rej_soft})→ 净成功 {len(success)}。"
                 f"白名单免剔 {n_allow_override}(内容QC 核实真正文、纠黑名单假阳)"
-                f"{('、开卷门吊销 %d(落盘实为错文)' % n_allow_revoked) if n_allow_revoked else ''}。"
+                f"{('、开卷门吊销 %d(落盘实为错文)' % n_allow_revoked) if n_allow_revoked else ''}"
+                f"{('、其中 %d 份自 rejected/ 复活(方案C,pdf_in_rejected 留证)' % n_allow_rescued) if n_allow_rescued else ''}。"
                 "被剔除者改判 miss 并进 still_missing(留 qc_rejected_source/pdf 供复核)。"
                 if (qc_hard or qc_soft or qc_allow) else "未启用 QC 黑名单(--no-qc 或文件缺失):success 为原始去重口径,可能含抓错论文假成功。"
             ),
@@ -641,7 +683,8 @@ def build(out_root: str,
         "generated_ts": time.strftime("%Y-%m-%d %H:%M:%S"),
         "out_root": out_root,
         "caliber": ("success = metadata.success AND pdf 文件名存在于 <batch>/pdfs/(不信 summary.json);"
-                    "跨批 success 并集(取 pdf_bytes 最大)、miss 取末次原因"),
+                    "跨批 success 并集(取 pdf_bytes 最大)、miss 取末次原因;"
+                    "方案C:qc_allow 白名单命中项额外认 <batch>/rejected/(pdf_in_rejected 留证、照过开卷门)"),
         "scanned_dirs": per_dir,
         "summary": summary,
         "records": records,
@@ -909,7 +952,8 @@ def _selftest() -> int:
             f.write(rec("10.1000/d2", False, error="no-candidates"))
             f.write(rec("10.1000/d3", True, "websearch", "out/batchA/pdfs/d3.pdf", 1500))
             f.write(rec("10.1000/d4", False, error="old-timeout"))
-            f.write(rec("10.1000/d5", True, "unpaywall", "out/batchA/pdfs/d5.pdf", 900))  # 无文件
+            f.write(rec("10.1000/d5", True, "unpaywall", "out/batchA/pdfs/d5.pdf", 900,
+                        title="Catalytic CO2 Hydrogenation over Copper Catalysts"))  # 无文件
         open(os.path.join(a, "pdfs", "d1.pdf"), "w").close()
         open(os.path.join(a, "pdfs", "d3.pdf"), "w").close()
         # 注意:d5.pdf 故意不创建
@@ -1056,6 +1100,61 @@ def _selftest() -> int:
         assert res_on["summary"]["qc"]["allow_revoked_openbook"] == 0, res_on["summary"]["qc"]
         res_off = build(root, qc_hard=set(), qc_soft={"10.1000/d1"}, qc_allow={"10.1000/d1"}, verify_allow=False)
         assert res_off["summary"]["success"] == res_on["summary"]["success"], "开卷门缺证据时不得改变净成功"
+
+        # ── 方案C(writeback149 根因治理):qc_allow 命中项额外认 <batch>/rejected/ ──
+        # 场景:d5 声称成功但 pdfs/ 无文件(上面已断言 miss+claimed_no_pdf);现把同名文件放进
+        # batchA/rejected/(模拟 cleanup 误隔离的翻案 gold)。
+        os.makedirs(os.path.join(a, "rejected"), exist_ok=True)
+        open(os.path.join(a, "rejected", "d5.pdf"), "w").close()
+        # (a) 无白名单 → 一律不认 rejected/:d5 仍 miss(行为与旧版逐字节一致)
+        res_nc = build(root)
+        bnc = {r["doi"]: r for r in res_nc["records"]}
+        assert bnc["10.1000/d5"]["status"] == "miss", bnc["10.1000/d5"]
+        assert res_nc["summary"]["success"] == 3, res_nc["summary"]
+        # (b) 白名单不含 d5 → 同样不复活(非白名单 DOI 永不认 rejected/)
+        res_na = build(root, qc_allow={"10.1000/d1"}, verify_allow=False)
+        bna = {r["doi"]: r for r in res_na["records"]}
+        assert bna["10.1000/d5"]["status"] == "miss", bna["10.1000/d5"]
+        # (c) 白名单含 d5 → 复活:success、pdf_path 指向 rejected/ 真实文件、pdf_in_rejected 留证、
+        #     qc=allow_override;汇总 allow_rescued_from_rejected=1;still_missing 不再含 d5。
+        #     (空文件非有效 PDF → 开卷无法判定 → no-false-kill 保留,verify_allow 开着也复活)
+        res_rc = build(root, qc_allow={"10.1000/d5"}, verify_allow=True)
+        brc = {r["doi"]: r for r in res_rc["records"]}
+        d5 = brc["10.1000/d5"]
+        assert d5["status"] == "success" and d5["qc"] == "allow_override", d5
+        assert d5["pdf_in_rejected"] is True, d5
+        assert d5["pdf_path"].endswith("batchA/rejected/d5.pdf"), d5["pdf_path"]
+        assert os.path.isfile(d5["pdf_path"]) or os.path.isfile(
+            os.path.join(os.path.dirname(os.path.abspath(root)), d5["pdf_path"])), d5["pdf_path"]
+        assert res_rc["summary"]["success"] == 4, res_rc["summary"]
+        assert res_rc["summary"]["qc"]["allow_rescued_from_rejected"] == 1, res_rc["summary"]["qc"]
+        assert "10.1000/d5" not in still_missing_dois(res_rc), still_missing_dois(res_rc)
+        # per_dir 原始落盘审计口径不掺 QC 态:batchA 落盘实证仍是 2(d1/d3),不因复活而虚增
+        pa_rc = {d["batch"]: d for d in res_rc["scanned_dirs"]}
+        assert pa_rc["batchA"]["unique_real_success"] == 2, pa_rc["batchA"]
+        # (d) pdfs/ 实盘压过 rejected/ 复活指针:把 d5.pdf 补进 pdfs/ 后,指针必须回到 pdfs/
+        open(os.path.join(a, "pdfs", "d5.pdf"), "w").close()
+        res_rp = build(root, qc_allow={"10.1000/d5"}, verify_allow=False)
+        d5p = {r["doi"]: r for r in res_rp["records"]}["10.1000/d5"]
+        assert d5p["status"] == "success" and not d5p.get("pdf_in_rejected"), d5p
+        assert d5p["pdf_path"].endswith("batchA/pdfs/d5.pdf"), d5p["pdf_path"]
+        assert res_rp["summary"]["qc"]["allow_rescued_from_rejected"] == 0, res_rp["summary"]["qc"]
+        # (e) 开卷门对复活项照样有牙:monkeypatch 喂『错文正文』(d5 有标题、正文不命中且无期望DOI)
+        #     → 复活项被吊销免死金牌、回 miss;rescued 计数归零(复活绝不豁免开卷门)。
+        os.remove(os.path.join(a, "pdfs", "d5.pdf"))
+        _orig_body_fn2 = globals()["_openbook_pdf_body"]
+        globals()["_openbook_pdf_body"] = lambda _p, _o: (
+            "convex optimization boyd stanford textbook chapter three " * 20)
+        try:
+            res_rv = build(root, qc_allow={"10.1000/d5"}, verify_allow=True)
+        finally:
+            globals()["_openbook_pdf_body"] = _orig_body_fn2
+        d5v = {r["doi"]: r for r in res_rv["records"]}["10.1000/d5"]
+        assert d5v["status"] == "miss" and d5v["qc"] == "allow_revoked_openbook", d5v
+        assert res_rv["summary"]["qc"]["allow_revoked_openbook"] == 1, res_rv["summary"]["qc"]
+        assert res_rv["summary"]["qc"]["allow_rescued_from_rejected"] == 0, res_rv["summary"]["qc"]
+        # 清理方案C 夹具,避免影响后续 run_coverage/CLI 段的既有断言
+        os.remove(os.path.join(a, "rejected", "d5.pdf"))
 
         # read_qc_dois:能从带表头 CSV 读出规范化 doi(大小写/前缀归一)
         qc_csv = os.path.join(tmp, "qc.csv")

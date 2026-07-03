@@ -27,6 +27,8 @@ DEFAULT_SOURCE_ORDER: List[str] = [
     "osf",              # OSF 预印本仓储(primary_file 直下)
     "zenodo",           # 数据/附件/部分论文
     "scienceopen",      # ScienceOpen 自托管 OA 落地页(前缀 10.14293)
+    "openalex_content", # OpenAlex 官方缓存 PDF(~60M 篇,需 openalex_key;成功下载才计费,
+                        # 免费档 $1/天≈100 篇):置于全部免费源之后、websearch 前,真 miss 才花额度
     "websearch",        # 免费搜索引擎(DuckDuckGo/Bing)找作者自存稿/机构库 PDF(兜底、真 miss 才触发)
     "wayback",          # Internet Archive/Wayback 存档 PDF 兜底
     # "browser_search", # 无头隐身浏览器驱动搜索引擎(重、易被限):默认关,--sources ...,browser_search 显式开启

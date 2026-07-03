@@ -71,6 +71,46 @@ class OpenAlex(BaseSource):
 
 
 @register
+class OpenAlexContent(BaseSource):
+    """OpenAlex Content API:官方缓存全文 PDF(约 6000 万篇,content.openalex.org)。
+
+    需 openalex_key(免费注册):计费按【成功下载】计($0.01/篇;免费档每日 $1 ≈ 100 篇,
+    未绑卡超出预算即被拒,不会超扣),404/未缓存不计费。故源序放在全部免费源之后、
+    websearch 兜底之前——仅真 miss 才花额度。候选 URL **绝不携带 api_key**(避免泄入
+    attempts.jsonl / results.csv / report.html 等产物),由 HttpClient 对
+    content.openalex.org 域在请求时单点注入(见 http_client.HttpClient.get)。
+    先经 works 单条(免费、不限量)拿 work id 与 has_content/content_urls,再给候选:
+    content_urls.pdf(官方权威指针)优先;has_content 明确说无 PDF → 让位(省一次必 404);
+    其余按 work id 构造直链,未缓存时下载层 %PDF 校验自然过滤,不产假成功。
+    """
+
+    name = "openalex_content"
+
+    def find_candidates(self, paper: Paper, ctx: SourceContext) -> List[PdfCandidate]:
+        key = getattr(ctx.cfg, "openalex_key", None)
+        if not key:
+            return []          # 该 API 必须带 key;未配置 → 本源静默让位(零请求)
+        data = ctx.client.get_json(
+            f"https://api.openalex.org/works/doi:{paper.doi}",
+            params={"mailto": ctx.cfg.email, "api_key": key},
+        )
+        if not data:
+            return []
+        curls = data.get("content_urls")
+        if isinstance(curls, dict) and curls.get("pdf"):
+            return [PdfCandidate(str(curls["pdf"]), self.name, "pdf", None, None, 85)]
+        hc = data.get("has_content")
+        hc_pdf = hc.get("pdf") if isinstance(hc, dict) else (hc if isinstance(hc, bool) else None)
+        if hc_pdf is False:
+            return []
+        wid = str(data.get("id") or "").rstrip("/").rsplit("/", 1)[-1].upper()
+        if not (wid.startswith("W") and wid[1:].isdigit()):
+            return []
+        return [PdfCandidate(f"https://content.openalex.org/works/{wid}.pdf",
+                             self.name, "pdf", None, None, 85)]
+
+
+@register
 class SemanticScholar(BaseSource):
     name = "semantic_scholar"
 
@@ -611,5 +651,45 @@ if __name__ == "__main__":  # 纯函数 selftest(不联网): python -m fulltext_
         [PdfCandidate("https://boom.org/x.pdf", "x", "pdf", None, None, 90),
          PdfCandidate("https://ok.org/b.pdf", "y", "pdf", None, None, 80)], _boom)
     assert _bh is not None and _bh.url == "https://ok.org/b.pdf", _bh
+
+    # ══ OpenAlexContent(官方缓存 PDF,content.openalex.org)══════════════════════
+    class _CountClient(_OAClient):
+        def __init__(self, data):
+            super().__init__(data); self.calls = 0
+        def get_json(self, url, **kw):
+            self.calls += 1; return self._data
+
+    class _KeyCfg(_OACfg):
+        openalex_key = "K"
+
+    class _OCtx:
+        def __init__(self, data, cfg):
+            self.client = _CountClient(data); self.cfg = cfg; self.log = None; self.events = None
+
+    _P = Paper(doi="10.1/x")
+    # ①(默认)无 key → 静默让位:零候选且零请求(该 API 必须 key,别浪费一次调用)
+    _c_nokey = _OCtx({"id": "https://openalex.org/W1"}, _OACfg())
+    assert OpenAlexContent().find_candidates(_P, _c_nokey) == [] and _c_nokey.client.calls == 0
+    # ② content_urls.pdf(官方权威指针)优先原样使用;候选 URL 不得携带 api_key(防泄密)
+    _c2 = _OCtx({"id": "https://openalex.org/W1",
+                 "content_urls": {"pdf": "https://content.openalex.org/works/W1.pdf"}}, _KeyCfg())
+    _r2 = OpenAlexContent().find_candidates(_P, _c2)
+    assert [c.url for c in _r2] == ["https://content.openalex.org/works/W1.pdf"], _r2
+    assert _r2[0].kind == "pdf" and _r2[0].confidence == 85 and _r2[0].source == "openalex_content"
+    assert "api_key" not in _r2[0].url, "候选 URL 绝不携带 api_key(泄入产物)"
+    # ③ 无 content_urls → 按 work id 构造直链;小写/带斜杠 id 归一
+    _r3 = OpenAlexContent().find_candidates(_P, _OCtx({"id": "https://openalex.org/w3038568908/"},
+                                                      _KeyCfg()))
+    assert [c.url for c in _r3] == ["https://content.openalex.org/works/W3038568908.pdf"], _r3
+    # ④ has_content 明确说无 pdf → 让位(省一次必 404);dict 与 bool 两种形态都识别
+    assert OpenAlexContent().find_candidates(
+        _P, _OCtx({"id": "https://openalex.org/W1", "has_content": {"pdf": False}}, _KeyCfg())) == []
+    assert OpenAlexContent().find_candidates(
+        _P, _OCtx({"id": "https://openalex.org/W1", "has_content": False}, _KeyCfg())) == []
+    # ⑤ has_content 说有 → 照常构造;查无此 DOI / id 畸形 → 零候选不抛
+    assert len(OpenAlexContent().find_candidates(
+        _P, _OCtx({"id": "https://openalex.org/W1", "has_content": {"pdf": True}}, _KeyCfg()))) == 1
+    assert OpenAlexContent().find_candidates(_P, _OCtx(None, _KeyCfg())) == []
+    assert OpenAlexContent().find_candidates(_P, _OCtx({"id": "junk"}, _KeyCfg())) == []
 
     print("AGGREGATORS_OK")

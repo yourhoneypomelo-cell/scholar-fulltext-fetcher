@@ -290,6 +290,13 @@ class HttpClient:
                 # 仅对需机构访问的域名注入会话 Cookie(不外泄给 OA/第三方);调用方显式 headers 优先。
                 headers = {"Cookie": cookie, **(headers or {})}
             url = rewrite_url_for_proxy(url, self.cfg)
+        # OpenAlex Content API 凭据单点注入(openalex_content 源):候选/日志/产物里的 URL 一律
+        # 不带 api_key(防泄密),仅在真正发请求的这一刻对 content.openalex.org 域补上;
+        # 调用方已显式给 api_key(params 或 URL 内)则绝不覆盖。其它域名零影响。
+        if urlparse(url).netloc == "content.openalex.org" and "api_key=" not in url:
+            _oa_key = getattr(self.cfg, "openalex_key", None)
+            if _oa_key and "api_key" not in (params or {}):
+                params = {**(params or {}), "api_key": _oa_key}
         host = urlparse(url).netloc
         with self._host_lock:
             down = host in self._host_down
@@ -308,6 +315,18 @@ class HttpClient:
                 if r.status_code in (429, 500, 502, 503, 504):
                     ra = r.headers.get("Retry-After")
                     delay = float(ra) if (ra and ra.isdigit()) else float(2 ** attempt)
+                    # 长 Retry-After(>5min)= 本次运行内重试注定徒劳(典型:OpenAlex Content API
+                    # 日预算耗尽回 429 + Retry-After≈到 UTC 午夜的秒数)。退避上限才 30s,反复重试
+                    # 只会把批量跑的每条 miss 拖慢 `30s×重试数`——直接熔断该 host,快速失败、
+                    # 其余源照常兜底;下次运行(预算重置后)自然恢复。
+                    if delay > 300:
+                        self.log.warning("HTTP %s %s Retry-After=%.0fs(远超退避上限)→ 本次运行内"
+                                         "跳过该 host(如为 API 日预算耗尽,次日自动恢复)",
+                                         r.status_code, url, delay)
+                        r.close()
+                        with self._host_lock:
+                            self._host_down.add(host)
+                        return None
                     self.log.warning("HTTP %s %s -> 退避 %.1fs (第%d次)", r.status_code, url, min(delay, 30), attempt + 1)
                     r.close()
                     time.sleep(min(delay, 30))
@@ -377,9 +396,11 @@ if __name__ == "__main__":  # 不联网 selftest: python -m fulltext_fetcher.htt
             self.script = list(script)
             self.headers: Dict[str, str] = {}
             self.calls = 0
+            self.last_kw: Dict[str, Any] = {}   # 最近一次 get 的关键字参数(供注入类断言)
 
         def get(self, url, **kw):  # noqa: ANN001
             self.calls += 1
+            self.last_kw = kw
             item = self.script.pop(0) if self.script else _Resp(200)
             if isinstance(item, BaseException):
                 raise item
@@ -432,6 +453,22 @@ if __name__ == "__main__":  # 不联网 selftest: python -m fulltext_fetcher.htt
         assert r6 is not None and r6.status_code == 200, r6
         assert c6.session.calls == 2, c6.session.calls
 
+        # ⑥b 429 + 超长 Retry-After(>300s,如 OpenAlex Content API 日预算耗尽给出的"到 UTC 午夜"):
+        #     不做注定徒劳的 30s×N 重试,单次即熔断该 host、快速返回 None(其余源照常兜底)
+        c6b = _client([_Resp(429)] * 5, max_retries=4)
+        c6b.session.script[0].headers = {"Retry-After": "28394"}
+        r6b = c6b.get("https://content.openalex.org/works/W1.pdf")
+        assert r6b is None and c6b.session.calls == 1, (r6b, c6b.session.calls)
+        assert "content.openalex.org" in c6b._host_down, c6b._host_down
+        # 同 host 后续请求直接跳过(零请求),不再拖慢批量跑
+        assert c6b.get("https://content.openalex.org/works/W2.pdf") is None
+        assert c6b.session.calls == 1, c6b.session.calls
+        # 常规短 Retry-After(可数秒)仍走既有退避重试路径,行为不变
+        c6c = _client([_Resp(429), _Resp(200)], max_retries=3)
+        c6c.session.script[0].headers = {"Retry-After": "2"}
+        assert c6c.get("https://api.crossref.org/works").status_code == 200
+        assert c6c.session.calls == 2, c6c.session.calls
+
         # ⑦ 首次即成功 → 单次调用、host 记 ok
         c7 = _client([_Resp(200)])
         assert c7.get("https://api.unpaywall.org/v2/x").status_code == 200
@@ -454,6 +491,25 @@ if __name__ == "__main__":  # 不联网 selftest: python -m fulltext_fetcher.htt
         assert HttpClient._parse_interval_seconds("2") == 2.0
         assert HttpClient._parse_interval_seconds("") == 0.0
         assert HttpClient._parse_interval_seconds("abc") == 0.0
+
+        # ⑨b OpenAlex Content API 凭据单点注入(openalex_content 源配套):
+        #    仅 content.openalex.org 域、且调用方未自带 api_key 时,请求时刻补注 cfg.openalex_key;
+        #    候选/日志里的 URL 因此可以永远不携带 key(防泄入产物)。
+        c9 = _client([_Resp(200)] * 4)
+        c9.cfg.openalex_key = "SECRET"                       # 动态附加(生产 Config 自有该字段)
+        c9.get("https://content.openalex.org/works/W1.pdf")
+        assert (c9.session.last_kw.get("params") or {}).get("api_key") == "SECRET", \
+            c9.session.last_kw                               # 注入生效
+        c9.get("https://api.openalex.org/works/doi:10.1/x")  # 其它域名零影响
+        assert "api_key" not in (c9.session.last_kw.get("params") or {}), c9.session.last_kw
+        c9.get("https://content.openalex.org/works/W1.pdf", params={"api_key": "CALLER"})
+        assert (c9.session.last_kw.get("params") or {}).get("api_key") == "CALLER", \
+            "调用方显式 api_key 绝不覆盖"
+        c9.get("https://content.openalex.org/works/W1.pdf?api_key=INURL")
+        assert "api_key" not in (c9.session.last_kw.get("params") or {}), "URL 已带 key → 不再注入"
+        c9nk = _client([_Resp(200)])                         # 未配置 key(getattr→None)→ 不注入
+        c9nk.get("https://content.openalex.org/works/W2.pdf")
+        assert "api_key" not in (c9nk.session.last_kw.get("params") or {}), c9nk.session.last_kw
 
         # ── ⑩ 可选 impersonate 取回(curl_cffi,默认关)——不改既有 requests 路径 ──
         # 注:`python -m` 下本文件以 __main__ 执行,与 import 的 fulltext_fetcher.http_client 是两份
