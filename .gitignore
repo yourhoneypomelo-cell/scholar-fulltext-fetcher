@@ -55,6 +55,7 @@ Thumbs.db
 /_*.py
 /_*.txt
 /_*.json
+/_*.log
 
 # ===== 实验归档桶 & 杂散虚拟环境（near-clean：留磁盘、不入库）=====
 # 如日后想把 archive/ 实验史入 git 留证，删下面 /archive/ 一行并 `git add -f archive/`。
