@@ -109,6 +109,8 @@ out/example_run/
 ```powershell
 # 标准批量（推荐正门）
 python run_all.py -f my_papers.txt --email you@uni.edu --openalex-key $env:OPENALEX_KEY -o out/my_batch -c 3
+# 可选更多 API key（提升源限额 / 启用 core 源）：--s2-key / --core-key
+#   三件套默认均从环境变量别名回退：OPENALEX_KEY、S2_KEY（别名 SEMANTIC_SCHOLAR_API_KEY）、CORE_KEY（别名 CORE_API_KEY）——设了 env 即自动生效
 
 # 闭环续跑：用上一轮 still_missing 作输入（--resume 默认仍会跨 out/ 剔已成功）
 python run_all.py -f out/my_batch/still_missing.txt --email you@uni.edu -o out/my_batch_r2

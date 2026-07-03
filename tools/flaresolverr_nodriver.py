@@ -163,10 +163,10 @@ class Solver:
     async def _get_cookies(self, host: str) -> List[Dict[str, Any]]:
         raw: List[Any] = []
         try:
-            raw = await self._tab.send(cdp.network.get_all_cookies())
+            raw = await self._browser.cookies.get_all()          # 非弃用 API 首选(nodriver ≥1.3)
         except Exception:  # noqa: BLE001
             try:
-                raw = await self._browser.cookies.get_all()
+                raw = await self._tab.send(cdp.network.get_all_cookies())   # 兜底:旧版/CDP 直取
             except Exception:  # noqa: BLE001
                 raw = []
         out: List[Dict[str, Any]] = []
