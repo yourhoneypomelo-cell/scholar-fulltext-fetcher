@@ -57,10 +57,20 @@ Thumbs.db
 /_*.json
 /_*.log
 
+# ===== 交付打包产物（大二进制，可由 consolidate_delivery 复现，严禁入库膨胀仓库）=====
+# 根锚定：仅忽略仓根打包件（如 谷歌学术全文交付-368-enriched.zip 775MB），不影响 examples/ 等。
+/*.zip
+/*.7z
+/*.tar.gz
+
 # ===== 实验归档桶 & 杂散虚拟环境（near-clean：留磁盘、不入库）=====
 # 如日后想把 archive/ 实验史入 git 留证，删下面 /archive/ 一行并 `git add -f archive/`。
 /archive/
 .venv*/
+
+# ===== 交付打包（PDF 全文 zip：大体量二进制，留磁盘方便取用、绝不入库）=====
+/*交付*.zip
+/*delivery*.zip
 
 # ===== 仓根一次性输入/探针/临时数据散件（会话临时·可复现·不入库；文件留磁盘）=====
 # 根锚定：仅忽略仓根散件，不影响 examples/ 下交付样例、生产码与交付文档(.md)。

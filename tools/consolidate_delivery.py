@@ -198,7 +198,17 @@ def build_plan(coverage_path, out_root, template, *, enrich=False, mailto=None,
             journal=m.get("venue") or m.get("journal"),
         )
         new_name = build_filename(None, paper, cfg, taken=taken)
-        plan.append((doi, src, new_name))
+        auth0 = ""
+        if isinstance(paper.authors, (list, tuple)) and paper.authors:
+            a0 = paper.authors[0]
+            auth0 = a0.get("family") or a0.get("name") or "" if isinstance(a0, dict) else str(a0)
+        elif paper.authors:
+            auth0 = str(paper.authors)
+        plan.append({
+            "doi": doi, "src": src, "new_name": new_name,
+            "year": paper.year or "", "author": auth0,
+            "title": paper.title or "", "journal": paper.journal or "",
+        })
     return plan, skipped_no_disk, enrich_stats
 
 
@@ -214,22 +224,30 @@ def run(coverage_path, dest, template, do_copy=True, *, enrich=False, mailto=Non
     pdf_dir = os.path.join(dest, "pdfs")
     if do_copy:
         os.makedirs(pdf_dir, exist_ok=True)
-    names = [n for _, _, n in plan]
+    names = [it["new_name"] for it in plan]
     assert len(names) == len(set(names)), "命名撞车（build_filename taken 去重应保证唯一）"
     copied = 0
-    manifest_rows = []
-    for doi, src, new_name in plan:
-        dst = os.path.join(pdf_dir, new_name)
+    for it in plan:
+        dst = os.path.join(pdf_dir, it["new_name"])
         if do_copy:
-            shutil.copy2(src, dst)
+            shutil.copy2(it["src"], dst)
             copied += 1
-        manifest_rows.append({"doi": doi, "new_name": new_name, "src_path": src})
     if do_copy:
+        # ① 机器可读 manifest（doi→新名→原路径），供程序回溯
         man_path = os.path.join(dest, "manifest.csv")
         with open(man_path, "w", encoding="utf-8", newline="") as f:
             w = csv.DictWriter(f, fieldnames=["doi", "new_name", "src_path"])
             w.writeheader()
-            w.writerows(manifest_rows)
+            for it in plan:
+                w.writerow({"doi": it["doi"], "new_name": it["new_name"], "src_path": it["src"]})
+        # ② 人类可读 manifest（年/作者/标题/DOI/文件名），供人核对
+        read_path = os.path.join(dest, "manifest_readable.csv")
+        with open(read_path, "w", encoding="utf-8-sig", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=["year", "author", "title", "doi", "journal", "filename"])
+            w.writeheader()
+            for it in sorted(plan, key=lambda x: (str(x["year"]) or "0", str(x["author"]).lower())):
+                w.writerow({"year": it["year"], "author": it["author"], "title": it["title"],
+                            "doi": it["doi"], "journal": it["journal"], "filename": it["new_name"]})
         # 落盘校验：目录内 PDF 数应 == 计划数
         on_disk = len([n for n in os.listdir(pdf_dir) if n.lower().endswith(".pdf")])
         assert on_disk == len(plan), f"落盘校验失败：磁盘 {on_disk} != 计划 {len(plan)}"
@@ -293,6 +311,12 @@ def _selftest():
         files = os.listdir(os.path.join(dest, "pdfs"))
         assert len(files) == 1 and files[0].endswith(".pdf"), files
         assert os.path.exists(os.path.join(dest, "manifest.csv"))
+        # 人类可读 manifest 也应生成，且含 year/author/title/doi/filename 列
+        read_csv = os.path.join(dest, "manifest_readable.csv")
+        assert os.path.exists(read_csv), read_csv
+        rows = list(csv.DictReader(open(read_csv, encoding="utf-8-sig")))
+        assert len(rows) == 1 and rows[0]["doi"] == "10.1/abc" and rows[0]["title"] == "Cool Paper", rows
+        assert set(rows[0].keys()) == {"year", "author", "title", "doi", "journal", "filename"}, rows[0]
 
         # enrich 幂等缓存离线验证：预置缓存命中 → 不发网络即补全 year/author、重命名带年/作者
         meta = {"10.1/abc": {"title": "Cool Paper"}}
