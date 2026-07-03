@@ -141,6 +141,18 @@ def _read_xlsx(path: str) -> List[str]:
     return _extract_from_rows(rows)
 
 
+def _env_first(*names: str) -> str | None:
+    """按顺序取第一个非空环境变量值(canonical 名优先,常见通用别名兜底);全空 → None。
+    动因:本机/CI 常按业界通用惯例存 key(如 SEMANTIC_SCHOLAR_API_KEY / OPENALEX_API_KEY),
+    与本项目 canonical 名(S2_KEY / OPENALEX_KEY / CORE_KEY)对不上时 key 会被静默闲置;
+    补别名回退后免手动传参。值裁剪两端空白(粘贴的 key 常带换行/空格,会污染 HTTP 头)。"""
+    for n in names:
+        v = os.environ.get(n)
+        if v and v.strip():
+            return v.strip()
+    return None
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="fulltext_fetcher",
@@ -180,9 +192,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--print-json", action="store_true",
                    help="stdout 输出 JSON({summary,results}),供父程序/子进程接入")
     p.add_argument("--sources", help=f"逗号分隔的源及顺序(默认全部:{','.join(DEFAULT_SOURCE_ORDER)})")
-    p.add_argument("--openalex-key", default=os.environ.get("OPENALEX_KEY"))
-    p.add_argument("--s2-key", default=os.environ.get("S2_KEY"))
-    p.add_argument("--core-key", default=os.environ.get("CORE_KEY"))
+    p.add_argument("--openalex-key",
+                   default=_env_first("OPENALEX_KEY", "OPENALEX_API_KEY"),
+                   help="OpenAlex API key(默认取环境变量 OPENALEX_KEY,别名 OPENALEX_API_KEY)")
+    p.add_argument("--s2-key",
+                   default=_env_first("S2_KEY", "SEMANTIC_SCHOLAR_API_KEY", "S2_API_KEY"),
+                   help="Semantic Scholar API key(默认取环境变量 S2_KEY,"
+                        "别名 SEMANTIC_SCHOLAR_API_KEY / S2_API_KEY)")
+    p.add_argument("--core-key",
+                   default=_env_first("CORE_KEY", "CORE_API_KEY"),
+                   help="CORE API key(默认取环境变量 CORE_KEY,别名 CORE_API_KEY)")
     p.add_argument("--zotero-key", default=os.environ.get("ZOTERO_KEY"),
                    help="Zotero API Key(自备);连同 --zotero-library-id 提供后,"
                         "下载成功的文献自动写入你的 Zotero 库(默认取环境变量 ZOTERO_KEY)")
@@ -455,6 +474,34 @@ def _selftest() -> int:
             raise AssertionError("corrupt .xlsx 应抛 SystemExit")
         except SystemExit as e:
             assert (".xlsx" in str(e)) or ("Excel" in str(e)) or ("openpyxl" in str(e)), str(e)
+
+    # ⑨ API key 环境变量别名回退(_env_first):canonical 名优先、通用别名兜底、值裁剪空白。
+    #    覆盖本机实况:key 存成 SEMANTIC_SCHOLAR_API_KEY / OPENALEX_API_KEY 而非项目 canonical 名。
+    _KEY_ENVS = ("S2_KEY", "SEMANTIC_SCHOLAR_API_KEY", "S2_API_KEY",
+                 "OPENALEX_KEY", "OPENALEX_API_KEY", "CORE_KEY", "CORE_API_KEY")
+    _saved_keys = {k: os.environ.pop(k, None) for k in _KEY_ENVS}
+    try:
+        assert _env_first("S2_KEY", "SEMANTIC_SCHOLAR_API_KEY") is None      # 全空 → None
+        os.environ["SEMANTIC_SCHOLAR_API_KEY"] = "  alias-val \n"
+        assert _env_first("S2_KEY", "SEMANTIC_SCHOLAR_API_KEY") == "alias-val", "别名兜底 + 裁剪空白"
+        assert build_parser().parse_args(["10.1/x"]).s2_key == "alias-val", "parser 应经别名取到 s2_key"
+        os.environ["S2_KEY"] = "canonical-val"
+        assert _env_first("S2_KEY", "SEMANTIC_SCHOLAR_API_KEY") == "canonical-val", "canonical 名必须优先"
+        assert build_parser().parse_args(["10.1/x"]).s2_key == "canonical-val"
+        assert build_parser().parse_args(["10.1/x", "--s2-key", "cli-val"]).s2_key == "cli-val", \
+            "显式 CLI 传参必须压过环境变量"
+        os.environ["S2_KEY"] = "   "                                          # 空白值视同未设 → 落到别名
+        assert _env_first("S2_KEY", "SEMANTIC_SCHOLAR_API_KEY") == "alias-val", "空白 canonical 应回退别名"
+        os.environ["OPENALEX_API_KEY"] = "oa-alias"
+        assert build_parser().parse_args(["10.1/x"]).openalex_key == "oa-alias"
+        os.environ["CORE_API_KEY"] = "core-alias"
+        assert build_parser().parse_args(["10.1/x"]).core_key == "core-alias"
+    finally:
+        for k, v in _saved_keys.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
     print("CLI_OK")
     return 0
