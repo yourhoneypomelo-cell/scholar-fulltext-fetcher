@@ -477,13 +477,25 @@ def _pdf_page_count(data: bytes) -> Optional[int]:
         return None
 
 
-def _extract_pdf_meta_dois(data: bytes) -> list:
-    """从 PDF 元数据(/Info 文档信息 + XMP)抽出内嵌的 DOI 串(原样、去重);缺 pypdf / 任何异常 → []。
+# 门③ 元数据 DOI 反向门(-143):**只取 PDF 自述身份 DOI**——XMP `prism:doi`/`dc:identifier`(或同名属性)
+# 与 /Info 里【键名含 'doi'】的字段。刻意【不扫整段 XMP 原文】:参考文献/被引 DOI 常混在 XMP RDF 里,
+# 全扫会把它们误当"自述 DOI" → 门③ 误杀真正文(-143 探针实锤:如 science.1192449 的 XMP 含多条被引 DOI)。
+# 精度优先:宁可少抽(recall 降)也不引参考文献噪声(precision 保)。
+_XMP_SELF_DOI_RE = re.compile(
+    r"(?is)<(?:prism:doi|dc:identifier|bx:doi)\b[^>]*>[^<]*?(10\.\d{4,9}/[^\s<]+)")
+_XMP_SELF_DOI_ATTR_RE = re.compile(
+    r"""(?is)\b(?:prism:doi|dc:identifier)\s*=\s*["'][^"']*?(10\.\d{4,9}/[^\s"'<>]+)""")
 
-    仅供门③(meta-doi-mismatch)做「PDF 自述身份 DOI vs 期望 DOI」反向比对——出版商 PDF 几乎必在
-    XMP(``prism:doi`` / ``dc:identifier``)或 /Info 里写自己的 DOI,若与期望【全不同】即该 PDF 自证
-    为他篇(专拦"同题他刊"title 假匹配)。与 _extract_pdf_text_meta 同哲学:延迟取 pypdf、任何异常降级
-    为 [](交由门放行,绝不误杀、绝不抛)。pypdf 各版本 XMP API 有别,故多路兜底。
+
+def _extract_pdf_meta_dois(data: bytes) -> list:
+    """从 PDF【自述身份】元数据抽内嵌 DOI(XMP prism:doi/dc:identifier + /Info 的 *doi* 键);
+    缺 pypdf / 任何异常 → []。绝不抛。
+
+    仅供门③(meta-doi-mismatch)做「PDF 自述 DOI vs 期望 DOI」反向比对——出版商 PDF 几乎必在 XMP
+    ``prism:doi`` / ``dc:identifier`` 写自己的 DOI,若与期望【全不同】即该 PDF 自证为他篇(专拦"同题
+    他刊")。**刻意只取自述身份字段、不扫整段 XMP 原文**:XMP RDF 里常混参考文献/被引 DOI,全扫会误抽
+    → 门③ 误杀真正文(-143 探针实锤)。与 _extract_pdf_text_meta 同哲学:延迟取 pypdf、任何异常降级为
+    [](交由门放行,绝不误杀、绝不抛)。pypdf 各版本 XMP API 有别,故多路兜底。
     """
     reader = _pdf_reader()
     if reader is None:
@@ -491,29 +503,32 @@ def _extract_pdf_meta_dois(data: bytes) -> list:
     import io
     out: list = []
 
-    def _collect(s: Any) -> None:
-        for mobj in _QC_DOI_RE.finditer(str(s or "")):
-            d = mobj.group(0)
-            if d not in out:
-                out.append(d)
+    def _add(s: Any) -> None:
+        mobj = _QC_DOI_RE.search(str(s or ""))
+        if mobj:
+            v = mobj.group(0)
+            if v not in out:
+                out.append(v)
 
     try:
         r = reader(io.BytesIO(data))
     except Exception:  # noqa: BLE001 - 解析失败 → 无元数据 DOI
         return []
-    # (a) /Info 文档信息:遍历所有值(常见键 /doi /prism:doi /Subject /Keywords /wps-articledoi)
+    # (a) /Info 文档信息:仅取【键名含 'doi'】的字段(如 /doi /prism:doi /wps-articledoi),
+    #     绝不碰 /Subject·/Keywords(可能是摘要/引用文本、含被引 DOI → 污染)。
     try:
         md = r.metadata
         if md:
             try:
-                vals = list(md.values())
+                items = list(md.items())
             except Exception:  # noqa: BLE001 - 畸形字典 → 跳过
-                vals = []
-            for v in vals:
-                _collect(v)
+                items = []
+            for k, v in items:
+                if "doi" in str(k).lower():
+                    _add(v)
     except Exception:  # noqa: BLE001 - 元数据缺失/畸形
         pass
-    # (b) XMP:取原始 XML 文本(prism:doi / dc:identifier 常载 DOI),正则捞 DOI;pypdf 版本差异多路兜底
+    # (b) XMP:仅匹配 <prism:doi>/<dc:identifier>/<bx:doi> 标签或同名属性(自述身份),不扫整段原文。
     try:
         xmp = r.xmp_metadata
         if xmp is not None:
@@ -532,8 +547,11 @@ def _extract_pdf_meta_dois(data: bytes) -> list:
                     except Exception:  # noqa: BLE001 - DOM 序列化失败 → 放弃 XMP
                         raw = None
             if raw is not None:
-                _collect(raw.decode("utf-8", "replace")
-                         if isinstance(raw, (bytes, bytearray)) else raw)
+                xml = (raw.decode("utf-8", "replace")
+                       if isinstance(raw, (bytes, bytearray)) else str(raw))
+                for rx in (_XMP_SELF_DOI_RE, _XMP_SELF_DOI_ATTR_RE):
+                    for mobj in rx.finditer(xml):
+                        _add(mobj.group(1))
     except Exception:  # noqa: BLE001 - 无 XMP / 版本 API 差异
         pass
     return out
