@@ -134,11 +134,39 @@ python run_all.py --verify -o out/my_batch
 
 ---
 
+## 交付成品 · 现有 368 篇全文（免费侧闭环）
+
+当前免费路线已跑到天花板：**净成功 368 篇**（口径见 `out/coverage.json` = 368/631/36.84%）。这 368 份 PDF 已**汇总到单一文件夹并统一命名**，随取随用：
+
+| 交付物 | 路径 | 说明 |
+|---|---|---|
+| **PDF 单一文件夹（推荐）** | `out/_delivery_368_enriched/pdfs/` | 368 份，命名 `{year}_{author}_{title}_{doi}`（经 Crossref 补全 year/author；330 篇完整、38 篇降级 `{title}_{doi}`） |
+| **人类可读清单** | `out/_delivery_368_enriched/manifest_readable.csv` | 列：year/author/title/doi/journal/filename（UTF-8-SIG，Excel 直接打开） |
+| **机器可读清单** | `out/_delivery_368_enriched/manifest.csv` | doi → 新文件名 → 原始落盘路径 |
+| **打包 zip** | 仓根 `谷歌学术全文交付-368-enriched.zip`（~775 MB） | 含 368 PDF + 两份 manifest；大二进制、已 gitignore 不入库 |
+
+> 另有仅 `{title}_{doi}` 命名的版本在 `out/_delivery_368/`（未补 year/author）。
+
+**用工具重建 / 增量更新**（`tools/consolidate_delivery.py`，纯本地文件操作，命名复用生产同源实现）：
+
+```powershell
+# 从权威 coverage.json 把所有已成功 PDF 汇总到单一文件夹 + 统一命名
+python tools/consolidate_delivery.py --dest out/_delivery
+
+# 额外用 Crossref 自动补全缺失的 year/author 后再命名（联网、幂等缓存、失败优雅降级）
+python tools/consolidate_delivery.py --enrich --mailto you@uni.edu --dest out/_delivery_enriched
+```
+
+> 覆盖率再往上（破 ~40%）需机构订阅（路线 A/B，见下文档），门控在用户真实凭据。
+
+---
+
 ## 深入阅读
 
 | 文档 | 用途 |
 |---|---|
 | [`用户Runbook-一键正门批量下载.md`](用户Runbook-一键正门批量下载.md) | **完整参数 / 日志判读 / FAQ / E2E 实测**（正门使用手册） |
+| `交付收口-全自动368-统一命名单一文件夹-141.md` | 368 篇交付收口报告（全自动性 + 汇总/命名核验） |
 | `基线口径冻结说明-388-173.md` | 净覆盖率 KPI 口径（唯一权威） |
 | `路线A-机构订阅实测Runbook-凭据到手3步.md` | 有机构凭据时（路线 A） |
 | `路线B-浏览器内直下PDF验证Runbook-173.md` | 强 CF 站 `--route-b`（路线 B） |
