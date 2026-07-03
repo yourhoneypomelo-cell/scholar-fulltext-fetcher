@@ -1,0 +1,15 @@
+# A5 即跑分片 · wiley · 13 条真实缺口(coverage.json 2026-07-03 22:07:22)
+# 凭据到位后:python run_all.py -f a5_shards/wiley.txt --institutional --route-b cf-only -o out/a5_wiley
+10.1002/1099-0739(200012)14:12
+10.1002/adfm.202205920  # Tuning the Cobalt–Platinum Alloy Regulating Single‐Atom Platinum for Highly Efficient Hydr
+10.1002/aic.690481123  # Phase equilibrium engineering of supercritical hydrogenation reactors
+10.1002/ange.202203836  # Single‐Atom Molybdenum‐N3 Sites for Selective Hydrogenation of CO2 to CO
+10.1002/anie.201007484  # The Mechanism of Potassium Promoter: Enhancing the Stability of Active Surfaces
+10.1002/asia.201600115  # Shape Engineering of Oxide Nanoparticles for Heterogeneous Catalysis
+10.1002/cctc.200900309  # Autoreduction and Catalytic Performance of a Cobalt Fischer–Tropsch Synthesis Catalyst Sup
+10.1002/cctc.201500295  # Continuous‐Flow Asymmetric Hydrogenation of an Enol Ester by using Supercritical Carbon Di
+10.1002/cphc.201800122  # Cu/CeO2 Catalyst for Water‐Gas Shift Reaction: Effect of CeO2 Pretreatment
+10.1002/cssc.201601217  # Origin of the Excellent Performance of Ru on Nitrogen‐Doped Carbon Nanofibers for CO2 Hydr
+10.1002/smll.201702928  # Ni‐Nanocluster Modified Black TiO2 with Dual Active Sites for Selective Photocatalytic CO2
+10.1002/smll.201902249  # Ultraefficient Conversion of CO2 into Morphology‐Controlled Nanocarbons: A Sustainable Str
+10.1111/jace.12174  # X‐ray Diffraction Study of the Effect of High‐Temperature Heat Treatment on the Microstruc

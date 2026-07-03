@@ -1,0 +1,3 @@
+# A5 即跑分片 · ecs · 1 条真实缺口(coverage.json 2026-07-03 22:07:22)
+# 凭据到位后:python run_all.py -f a5_shards/ecs.txt --institutional --route-b cf-only -o out/a5_ecs
+10.1149/1945-7111/acc6f7  # High Purity Hydrogen Separation with HT-PBI Based Electrochemical Pump Operation at 120 °C

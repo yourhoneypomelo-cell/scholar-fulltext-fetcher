@@ -1,0 +1,30 @@
+# A5 即跑分片 · acs · 28 条真实缺口(coverage.json 2026-07-03 22:07:22)
+# 凭据到位后:python run_all.py -f a5_shards/acs.txt --institutional --route-b cf-only -o out/a5_acs
+10.1021/ac00017a014  # Ionically modified electrodes for use in nonpolar fluids
+10.1021/acs.energyfuels.0c02333  # CFD Simulation of a Hydrogen-Permeable Membrane Reactor for CO2 Reforming of CH4: The Inte
+10.1021/acs.energyfuels.4c01466  # An Outlook on the Applications of Ru-Based Nanocatalysts for CO2 Hydrogenation to CO and C
+10.1021/acs.energyfuels.7b03945  # Syngas Production from Carbon Dioxide Reforming of Ethanol over Ir/Ce0.75Zr0.25O2 Catalyst
+10.1021/acs.iecr.9b01153  # CO2 Conversion Performance of Perovskite Oxides Designed with Abundant Metals
+10.1021/acscatal.2c06351  # Adsorption of Molecules on Defective CeO2 for Advanced Catalysis
+10.1021/acscatal.6c01251  # Gallium-Promoted CeO 2 Intensifies CO Production during CaCO 3 Hydrogenation
+10.1021/acscatal.8b05060  # Development of Tandem Catalysts for CO2 Hydrogenation to Olefins
+10.1021/cs4003436  # Catalysts for Production of Lower Olefins from Synthesis Gas: A Review
+10.1021/ie503496m  # Conversion of CO2over a Co-Based Fischer–Tropsch Catalyst
+10.1021/j100211a032  # Effect of support material on rhodium catalysts
+10.1021/j100367a066  # Adsorption of carbon monoxide on manganese-promoted rhodium/silica catalysts as studied by
+10.1021/j100635a006  # Isocyanate intermediates in the reaction nitrogen monoxide + carbon monoxide over a platin
+10.1021/ja00135a039  # C-O Bond Formation by Direct Addition of Methyl Radicals to Surface Oxygen on Rh(111)
+10.1021/ja9840403  # Synthesizing and Dispersing Silver Nanoparticles in a Water-in-Supercritical Carbon Dioxid
+10.1021/je00038a008  # Densities and viscosities of mixtures of carbon dioxide and n-decane from 310 to 403 K and
+10.1021/je00041a010  # Solubility of hydrogen in 10 organic solvents at 298.15, 323.15, and 373.15 K
+10.1021/je800926z  # Phase Equilibrium of Hydrogen, Carbon Dioxide, Squalene, and Squalane
+10.1021/jp0521353  # Supercritical Carbon Dioxide: An Inert Solvent for Catalytic Hydrogenation?
+10.1021/jp104715w  # The Role of Support Morphology and Impregnation Medium on the Water Gas Shift Activity of 
+10.1021/jp106538z  # Mechanistic Study of the Selective Methanation of CO over Ru/TiO2Catalyst: Identification 
+10.1021/jp108556u  # Study of Catalytic Activity at the CuO−CeO2 Interface for CO Oxidation
+10.1021/jp993021s  # The Chemistry of Alkyl Iodides on Copper Surfaces. 1. Adsorption Geometry
+10.1021/la00058a003  # Reversibility of C1 hydrogenation-dehydrogenation reactions on platinum surfaces under vac
+10.1021/la960296f  # Generation of C2H5 Species: Thermal and Photoinduced Dissociation of C2H5I on Rh(111)
+10.1021/la9707383  # Selectivity among Dehydrogenation Steps for Alkyl Groups on Metal Surfaces: Comparison bet
+10.1021/op970056m  # Selective Catalytic Hydrogenation of Organic Compounds in Supercritical Fluids as a Contin
+10.1021/op980007p  # Development of a Continuous Homogeneous Metal Complex Catalyzed, Asymmetric Hydrogenation 

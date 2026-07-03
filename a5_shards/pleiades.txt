@@ -1,0 +1,5 @@
+# A5 即跑分片 · pleiades · 3 条真实缺口(coverage.json 2026-07-03 22:07:22)
+# 凭据到位后:python run_all.py -f a5_shards/pleiades.txt --institutional --route-b cf-only -o out/a5_pleiades
+10.1134/s0036029512010132  # Kinetics of the low-temperature hydrogen reduction of magnetite concentrates
+10.1134/s1070427226020047  # Methane Dry Reforming over Ce/Zr- and La-modified SBA-15/Ni Catalysts
+10.1134/s2070050423040037  # Methanol Decomposition to Synthesis Gas over Supported Platinum-Containing Catalysts

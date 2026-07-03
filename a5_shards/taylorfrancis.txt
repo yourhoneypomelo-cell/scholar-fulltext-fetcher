@@ -1,0 +1,5 @@
+# A5 即跑分片 · taylorfrancis · 3 条真实缺口(coverage.json 2026-07-03 22:07:22)
+# 凭据到位后:python run_all.py -f a5_shards/taylorfrancis.txt --institutional --route-b cf-only -o out/a5_taylorfrancis
+10.1080/00986448808940423  # DYNAMIC KINETICS OF THE COMMON INTERMEDIATES FORMED IN CO AND CO2 HYDROGENATIONS ON Rh/MgO
+10.1080/0892702031000117135  # Thermal Properties of Supercritical Carbon Dioxide by Monte Carlo Simulations
+10.1080/09593330.2019.1625954  # A study on the effect of CeO2 addition to a Pt/TiO2 catalyst on the reverse water gas shif

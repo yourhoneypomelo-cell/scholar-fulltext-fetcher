@@ -1,0 +1,16 @@
+# A5 即跑分片 · springer · 14 条真实缺口(coverage.json 2026-07-03 22:07:22)
+# 凭据到位后:python run_all.py -f a5_shards/springer.txt --institutional --route-b cf-only -o out/a5_springer
+10.1007/bf00764363  # The effect of support structure on CO2 hydrogenation over a rhodium catalyst supported on 
+10.1007/bf00806560  # TPR study of the mechanism of rhenium promotion of alumina-supported cobalt Fischer-Tropsc
+10.1007/s10562-007-9027-7  # Effect of interparticle interaction on the low temperature oxidation of CO over size-selec
+10.1007/s10562-009-9904-3  # Water–Gas Shift Reaction over CuO/CeO2 Catalysts: Effect of the Thermal Stability and Oxyg
+10.1007/s10562-014-1278-5  # Synthesis of α-MoC1-x and β-MoCy Catalysts for CO2 Hydrogenation by Thermal Carburization 
+10.1007/s11244-009-9322-1  # Spectroscopic Study on the Nature of Active Entities in Copper–Ceria CO-PROX Catalysts
+10.1007/s11244-013-0148-5  # Electronic Metal–Support Interactions and the Production of Hydrogen Through the Water-Gas
+10.1007/s11244-018-1023-1  # Higher Hydrocarbons Synthesis from CO2 Hydrogenation Over K- and La-Promoted Fe–Cu/TiO2 Ca
+10.1007/s11244-020-01384-y  # Synergy Between Ceria and Metals (Ag or Cu) in Catalytic Diesel Particulate Filters: Effec
+10.1007/s11244-020-01405-w  # A Short Review of Recent Advances in Direct CO2 Hydrogenation to Alcohols
+10.1023/a:1015326726898  # Effects of Zirconia Phase on the Synthesis of Methanol over Zirconia-Supported Copper
+10.1023/a:1016359601399  # CO2 Hydrogenation on Rh/TiO2 Previously Reduced at Different Temperatures
+10.1023/a:1019071117449  # Mechanism of CO formation in reverse water–gas shift reaction over Cu/Al2O3 catalyst
+10.1023/a:1021006718974  # Study on the Mechanism of CO Formation in Reverse Water Gas Shift Reaction Over Cu/SiO2 Ca

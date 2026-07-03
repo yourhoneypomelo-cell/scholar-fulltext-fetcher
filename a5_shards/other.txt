@@ -1,0 +1,16 @@
+# A5 即跑分片 · other · 14 条真实缺口(coverage.json 2026-07-03 22:07:22)
+# 凭据到位后:python run_all.py -f a5_shards/other.txt --institutional --route-b cf-only -o out/a5_other
+10.1017/s0885715600010435  # Powder diffraction data and Rietveld refinement of Hägg-carbide, χ- Fe 5 C 2
+10.1109/lpt.2009.2035328  # Reduction of AlGaAs Heterostructure High-Index-Contrast Ridge Waveguide Scattering Loss by
+10.1146/annurev-chembioeng-073009-100935  # Catalytic Conversion of Renewable Biomass Resources to Fuels and Chemicals
+10.1155/2014/690514  # Synthesis and Catalytic Performance of Graphene Modified CuO‐ZnO‐Al2O3 for CO2 Hydrogenati
+10.1166/jnn.2011.4752  # One Pot Synthesis and Characterization of Ultra Fine CeO&lt;SUB&gt;2&lt;/SUB&gt; and Cu/Ce
+10.1166/jnn.2014.8962  # Development of Ni–Mo/Al&lt;SUB&gt;2&lt;/SUB&gt;O&lt;SUB&gt;3&lt;/SUB&gt; Catalyst for Reve
+10.1166/jnn.2019.16607  # Pt/UiO-66 Nanocomposites as Catalysts for CO2 Methanation Process
+10.1515/ijcre-2018-0008  # Catalytic Gasification – A Critical Analysis of Carbon Dioxide Methanation on a Ru/Al 2 O 
+10.1595/003214097x414166170  # Selective Ethanol Synthesis from Carbon Dioxide
+10.2113/gscanmin.42.1.17  # THE PHASE RELATIONS BETWEEN Fe4.5Ni4.5S8 AND Co9S8 IN THE SYSTEM Fe Ni Co S AT TEMPERATURE
+10.2138/am.2011.3775  # High-pressure structural behavior of -Fe2O3 studied by single-crystal X-ray diffraction an
+10.35848/1347-4065/ad280f  # Plasma-enabled electrification of chemical processes toward decarbonization of society
+10.3866/pku.whxb202304003  # Review on Using Molybdenum Carbides for the Thermal Catalysis of CO2 Hydrogenation to Prod
+10.7503/cjcu20230268

@@ -1,0 +1,5 @@
+# A5 即跑分片 · aip · 3 条真实缺口(coverage.json 2026-07-03 22:07:22)
+# 凭据到位后:python run_all.py -f a5_shards/aip.txt --institutional --route-b cf-only -o out/a5_aip
+10.1063/1.1647050  # Effects of carbon on the stability and chemical performance of transition metal carbides: 
+10.1063/1.2819245  # Modeling doped and defective oxides in catalysis with density functional theory methods: R
+10.1063/5.0228286  # Conceptual unification of mechanism-guided catalyst design for CO2 conversion to C1 produc

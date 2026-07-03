@@ -1,0 +1,48 @@
+# A5 即跑分片 · rsc · 46 条真实缺口(coverage.json 2026-07-03 22:07:22)
+# 凭据到位后:python run_all.py -f a5_shards/rsc.txt --institutional --route-b cf-only -o out/a5_rsc
+10.1039/a905548g  # Direct observation of surface isocyanate (NCO) formation during the CO+NO reaction on Pt{1
+10.1039/b103225a  # Influence of support and promotor on the catalytic activity of Rh/VOx/SiO2 model catalysts
+10.1039/b111498k  # Probing boundary sites on a Pt/Al2O3 model catalyst by CO2 hydrogenation and in situ ATR-I
+10.1039/b212220k  # Chemical reactions in supercritical carbon dioxide: from laboratory to commercial plantThi
+10.1039/b403438d  # On the importance of steady-state isotopic techniques for the investigation of the mechani
+10.1039/b510762h  # Selective oxidation of CO in the presence of H2, H2O and CO2utilising Au/α-Fe2O3catalysts 
+10.1039/b807428c  # Low-temperature water gas shift reaction on Cu/SiO2 prepared by an atomic layer epitaxy te
+10.1039/c0cp00789g  # Identification of the nitrogen species on N-doped graphene layers and Pt/NG composite cata
+10.1039/c0dt01404d  # Morphology-dependent nanocatalysis: metal particles
+10.1039/c0jm01908a  # Dramatic reduction of the oxygen vacancy formation energy in ceria particles: a possible k
+10.1039/c2cs15314a  # Continuous reactions in supercritical carbon dioxide: problems, solutions and possible way
+10.1039/c3cy00582h  # A novel route of enhancing oxidative catalytic activity: hydroxylation of MWCNTs induced b
+10.1039/c3cy00868a  # In situ FTIR spectroscopic study of the CO2methanation mechanism on Ni/Ce0.5Zr0.5O2
+10.1039/c4dt03470h  # PEGylated FePt–Fe3O4composite nanoassemblies (CNAs): in vitro hyperthermia, drug delivery 
+10.1039/c4ra00825a  # CO2 hydrogenation to dimethyl ether over CuO–ZnO–Al2O3/HZSM-5 prepared by combustion route
+10.1039/c4ra02037e  # High-temperature steam reforming of bio-oil derived light organics and methane to hydrogen
+10.1039/c4ra14572k  # Porous ternary Fe-based catalysts for the oxidative dehydrogenation of ethylbenzene in the
+10.1039/c5cp01922b  # Single Pt atom stabilized on nitrogen doped graphene: CO oxidation readily occurs via the 
+10.1039/c5ra04969e  # Supercritical fluid deposition of Ru nanoparticles onto SiO2 SBA-15 as a sustainable metho
+10.1039/c6cs00724d  # Metal–organic frameworks meet metal nanoparticles: synergistic effect for enhanced catalys
+10.1039/c6cy00861e  # Physical mixing of TiO2 with sponge nickel creates new active sites for selective CO metha
+10.1039/c6gc02490d  # Preparation of SBA-15 supported Pt/Pd bimetallic catalysts using supercritical fluid react
+10.1039/c7gc00952f  # Valuable new platform chemicals obtained by valorisation of a model succinic acid and bio-
+10.1039/c7nr03522e  # Hard templating ultrathin polycrystalline hematite nanosheets: effect of nano-dimension on
+10.1039/c8cp07077f  # Thermodynamic limits of countercurrent reactor systems, with examples in membrane reactors
+10.1039/c8cy00316e  # Optimization of N2O decomposition activity of CuO–CeO2 mixed oxides by means of synthesis 
+10.1039/d0cp02285c  # A DFT study for CO2 hydrogenation on W(111) and Ni-doped W(111) surfaces
+10.1039/d0ta09607e  # The development of bifunctional catalysts for carbon dioxide hydrogenation to hydrocarbons
+10.1039/d1cy01585k  # Boosting the performance of Ni/Al2O3 for the reverse water gas shift reaction through form
+10.1039/d2cc00208f  # Efficient CO2 conversion to CO using chemical looping over Co–In oxide
+10.1039/d2cp01971j  # Reaction-driven selective CO2hydrogenation to formic acid on Pd(111)
+10.1039/d2gc02623f  # Supercritical carbon dioxide as reaction medium for selective hydrogenation of fluorinated
+10.1039/d2nj03895a  # Enhanced catalytic activity of CO2 hydrogenation to CO over sulfur-containing Ni/ZrO2 cata
+10.1039/d2se00050d  # Slag-based geopolymer microsphere-supported Cu: a low-cost and sustainable catalyst for CO
+10.1039/d2ta05138a  # Multifunctional long-lived catalysts for direct hydrogenative conversion of CO2 to liquid 
+10.1039/d3cy00026e  # Evaluating metal oxide support effects on the RWGS activity of Mo2C catalysts
+10.1039/d3cy00419h  # Revealing the gas sensitive stability of formate species during CO2 hydrogenation
+10.1039/d3ta05845j  # A 3D-printed CuNi alloy catalyst with a triply periodic minimal surface for the reverse wa
+10.1039/d4nr01185f  # Polyoxometalate-HKUST-1 composite derived nanostructured Na–Cu–Mo2C catalyst for efficient
+10.1039/d4nr05471g  # Unique NiCo bimetal boosting 98% CH4 selectivity and high catalysis stability for photothe
+10.1039/d5cc04630k  # Aerosol-assisted synthesis of hybrid/composite porous nanostructures for CO 2 utilization
+10.1039/d5cy00597c  # Photo-induced enhancement of reverse water–gas shift over Mo-modified cerium oxide
+10.1039/d5cy00880h  # Entropy engineering enables synthesis of a perovskite-derived Ni–Co–Cu/La2O3–OV catalyst f
+10.1039/d5fd00172b  # The ever-evolving active site: transformation of single atoms to extended structures durin
+10.1039/d6cy00444j  # Extending the promoter–carbide interface strategy: a comparative study of promoters for re
+10.1039/tf9221700607  # Part II.—“Heterogeneous reactions”. Chemical reactions on surfaces
