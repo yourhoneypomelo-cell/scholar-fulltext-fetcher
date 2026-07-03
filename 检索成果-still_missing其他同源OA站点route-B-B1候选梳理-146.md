@@ -3,6 +3,8 @@
 > 交付：**谷歌学术人机认证-146**（worker）→ 总指挥 **-144**｜2026-07-02｜taskId=`task-427d53d4-ea6e-4e0b-b1a4-97d6edc353fa`
 > 边界：**纯只读分析，只新建本 1 份 md，未改任何 `.py`、未跑网络、未回写 coverage**。数据取自 `out/still_missing.txt`（620，头 2 行注释）、`fulltext_fetcher/sources/publisher_oa.py`（`_BUILDERS`/`COVERED_PUBLISHERS`）、`fulltext_fetcher/render_fetch.py`（`_JA3_BOUND_CF_HOSTS`/B1/B2 机制）、`检索成果-路线B回收波发射优先级-A集rsc67MDPI7-150.md`、`检索成果-still_missing620机制横切分桶与下一波ROI优先级-142.md`、`A5机构订阅现状与still_missing可救前缀梳理-150.md`。
 > **口径纪律**：发射/过盾/success ≠ 净增；**"需 route-B"特指"必须过 JA3/强 CF 盾才能拿到同源 PDF 字节"**——普通 OA 站点用 `publisher_oa` 同源直链 + 常规 `http_client` 即可，不占 route-B 有头浏览器算力。
+>
+> ⚠️ **净覆盖率口径统一（173 冻结）**：本文标题/正文的 **620 miss**（@18:25 快照）为**【历史口径】**。**【历史快照】当前权威见 `out/coverage.json`：326 success / 673 miss / 999 = 32.63%**（generated_ts 2026-07-03 12:50:24, allow_override=10）。B1「同源直取」候选=空集的结论仍有效，唯 miss 总数以 611 为准。唯一权威见 **《基线口径冻结说明-388-173.md》**。
 
 ---
 

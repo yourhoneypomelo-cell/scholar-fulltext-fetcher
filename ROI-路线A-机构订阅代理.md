@@ -4,6 +4,8 @@
 > 边界：**纯文档、只新建本 1 份 md，不改任何 `.py`/PDF/metadata、不联网抓正文**。数据取自仓内已提交文档、源码与 `out/still_missing_shards/_shard_stats.json`（551 条，2026-07-02 03:35）。
 > 关系：本文承接 -149《回收实测结论-CF与免费路线到顶》、-153《北极星主流程与回收结论汇总》、`机构订阅集成设计.md`、N3/N4《机构订阅与住宅代理方案》/《Cookie 持久化架构》，以及 -144 同日产出的《ROI-路线B-render_fetch》。**路线A 与路线B 互补**：A 破「真订阅付费墙」，B 破「JA3 绑定型 CF / viewer 包壳」；二者叠加才是 still_missing 的完整解法。
 > 一句话定位：**路线A = 在「用户已拥有合法机构订阅权限」前提下，经 EZproxy/CARSI/Shibboleth/OpenAthens/WebVPN 把 still_missing 里 ~300+ 纯订阅缺口合法取回——这是免费路线物理到顶后唯一根本途径，但强依赖机构凭据、且工程面比「开 `--institutional`」大得多。**
+>
+> ⚠️ **净覆盖率口径统一（173 冻结）**：本文分母/桶规模取自 `_shard_stats.json`（551 条，03:35 旧快照），属**【历史口径】**。**当前权威 = `out/coverage.json` `summary`：326 success / 673 miss / 999 = 32.63%**（generated_ts 2026-07-03 12:50:24，allow_override=10）。路线A 的 ROI/成本结论仍有效，唯 still_missing 总数以 673 为准。唯一权威见 **《基线口径冻结说明-388-173.md》**。
 
 ---
 

@@ -3,16 +3,18 @@
 > 交付：组员 **-149**｜2026-07-02｜工单来源：总指挥 **-156**「新建《回收实测结论-CF与免费路线到顶》（沉淀）」（taskId=`task-3c8609ee-4216-40bb-97ce-3db5d4a56a93`）。
 > 边界：**只新建本 1 个文件**，不改他人文档 / 任何 `.py`；证据均引自已提交文档与本人实测产物（引用见文末「证据索引」）。
 > 定位：把本轮「CF 破盾 + 免费兜底到顶」的实测结论集中固化一处，供总指挥/接手者直接引用，避免散落各处重复踩坑。
+>
+> ⚠️ **净覆盖率口径（定版 2026-07-03）**：**唯一权威 = `out/coverage.json` `summary`：326 success / 673 miss / 999 = 32.63%**（`generated_ts=2026-07-03 12:50:24`，`allow_override=10`）。已剔 batch6 ACS SI 33 + websearch 假阳 9 + OCR13 等。本文内 **340/659/34.03%（00:42:19）**、**339/660（01:27:42）**、**448/44.8%**、**388/38.84%**、逐批求和 **71.4%** 均属**【历史口径 / 理论上限】**。对照表见 **《基线口径冻结说明-388-173.md》**（已 re-freeze 至 326）。
 
 ---
 
 ## 〇、TL;DR（一句话）
 
 **免费手段的主矛盾已从「定位不到候选」转成「定位到候选却下不动」——墙集中在 Cloudflare JS 质询与出版商 403/登录墙上。** 破法分两类：
-- **Cloudflare「Just a moment」桶**（ACS-authorchoice / AIP / Wiley / OUP / T&F，连 ResearchGate·ChemRxiv 逃生口也进了 CF）→ **FlareSolverr / nodriver-shim 真解 `cf_clearance` 可救**（ACS 已实测真解为 PDF；RSC 仍难越）。
+- **Cloudflare「Just a moment」桶**（ACS-authorchoice / AIP / Wiley / OUP / T&F，连 ResearchGate·ChemRxiv 逃生口也进了 CF）→ **FlareSolverr / nodriver-shim 真解 `cf_clearance` 可救**（ACS 已实测可下到 PDF；**但 authorchoice 桶 ~93% 为 SI，QC 净增真正文 ≈1**）。**RSC：FS+curl_cffi 回放 ROI≈0**；**route-B 浏览器内直下对金 OA 子集仍有 +N**（与 FS 破盾是两条线）。
 - **Elsevier（ScienceDirect）IP/登录墙（非 CF）** 与 **纯订阅 403 付费墙（ACS/RSC 订阅刊）** → **免费路线已到顶**：`browser_search` 0/10、`wayback` 0/12 双双 0，唯一干净出路是机构订阅。
 
-> 🔴 **同等重要的质量警报（本轮内容级审计实锤，详见 §〇补）**：主力源 **websearch 系统性抓「错论文」假阳**（下载只校 `%PDF`+体积、不比对内容/DOI/标题）。剔错后**真实唯一正确论文净覆盖 = 448/999 ≈ 44.8%**，而非逐批求和的 71.4%（后者虚高、含错论文假成功 + 跨批重复）；**websearch 主线内容可信率点估仅 ≈ 33%**。故「CF/免费路线到顶」的同时，**已到手的成果本身还需内容闸门去伪**——两件事都要做。
+> 🔴 **同等重要的质量警报（详见 §〇补）**：websearch 系统性「错论文」假阳。**当前权威净覆盖 = 326/999 = 32.63%**（`coverage.json` 12:50:24，已剔 SI 33 + ws9 + OCR13 等）。〔历史：340/659（00:42:19）、339/660（01:27:42）、448/44.8%、388/38.84% 为演进快照〕**websearch 主线可信率点估 ≈33%**。故「CF/免费路线到顶」与「内容闸门去伪」**两件事叠加**才是诚实现状。
 
 ---
 
@@ -44,10 +46,11 @@
 - **产物（供 `build_coverage` 消费）**：`out/qc_merge_highconf_wrong.csv`（**54** 硬黑，两法都判错）∪ `qc_merge_union_wrong.csv`（**391** 并集）；`qc_merge_151match_url_conflict.csv`（**16** 条 151 判 match 但下载域与 DOI 冲突的假匹配，需人核）；`qc_rejected_manifest.csv`（**391** 已物理移入各批 `rejected/` 的地面真相）。
 - ⚠️ 教训：早期「两法**交集**」漏检太多，**140 已返工为并集**并补同社错论文 selftest。
 
-### 4. 净覆盖率修正（`tools/build_coverage.py` → `out/coverage.json`，黑名单感知权威口径）
-- **净成功 = 448 / 999 唯一 DOI ≈ 44.8%**（`success_before_qc=460` 剔 12 仍在盘错论文 → 448；余者早被 cleanup 移出 `pdfs/`）。
-- **对比**：core 三主语料批逐批 metadata 求和 = **866/1212 ≈ 71.4%**（审计基线，但含错论文假成功 + batch7↔batch6 跨批重复，**虚高约 1.6×**）；落盘实证求和已降到 484。**读报告认净 44.8%，不认 71.4%**。
-- **根治方向（未落地，高 ROI）**：把 QC 从「事后复扫」前移到「下载即校」——记 success 前复用 `qc_content_match.classify()`（纯函数）做 DOI-in-text/标题比对，mismatch 判失败试下一候选、uncertain 标 `qc_uncertain` 放行入复核。`out/qc_uncertain_sample_verify.csv` 的 40 条可作回归负样本 fixture。
+### 4. 净覆盖率修正（`tools/build_coverage.py` → `out/coverage.json`）
+- **当前权威净成功 = 326 / 999 ≈ 32.63%**（`generated_ts 2026-07-03 12:50:24`：`success_before_qc=514` 剔 **188**〔硬 33 + 软 155〕+ allow **10** → **326**；OCR14 −13 已并入）。〔340/34.03%@00:42:19 为【历史中途】〕
+- **对比**：逐批 metadata 求和 ≈ **71.4%** 为**【理论上限·虚高】**。**读报告认 326/32.63%，不认 71.4%/448/388/340/339**。
+- **已落盘卫生下修**：batch6 ACS SI **33** + websearch 假阳 **9**（-176/-169）等并入黑名单；推翻旧口径「ACS 4 真正文」→ **≈1**（`acscatal.0c04429`）。
+- **MDPI7 route-B 已回写**（`browser_pdf_download`×7），非「待救」。
 
 ---
 
@@ -62,9 +65,8 @@
   - 该 run 另有 3 条 `flaresolverr_recovered`（共 4）是 websearch 候选被 CF 挡后由 FS 救回：`iris.unito.it/...S0926337321004458-main.pdf` 3.50MB（对应 `10.1016/j.apcatb.2021.120319`)、ACS suppl `cs1c01504_si_001.pdf` 1.90MB(对应 `10.1016/0920-5861(95)00246-4`)、以及 `jaad.org/...S0190-9622(17)32530-6/pdf` 450KB（**对应 `10.1002/cssc.201601217`**）。
   > ⚠️ **交叉印证(与本轮 QC 内容比对连上)**：上面最后一条 FS「救回」的 `jaad.org`(皮肤病学 JAAD) 正是 QC 复扫里 `10.1002/cssc.201601217`(ChemSusChem) 的**确凿假阳(错论文)**样例 → **FlareSolverr 会忠实地把 websearch 的『错候选』也下载成功**，即 FS 成功 ≠ 正确全文。这再次指向「下载校验层需加 DOI/标题内容闸门」(见 `out/qc_content_report.md`、本轮 QC 任务)。
 
-**难越桶（RSC）——-145 实测确证仍 403，且定位到真正卡点**：`pubs.rsc.org` 整站 Cloudflare「Just a moment」，batch6 实测 **154 次 0 成功**。-145 的 FS run 里 3 条 RSC `articlepdf` 均 `flaresolverr_failed(reason=cloudflare-challenge(http-403))`：`.../articlepdf/2011/GC/C1GC15503B`、`.../2015/CC/C5CC01545F`、`.../2025/CY/D5CY00880H`。
-- **关键定位**：shim 侧 **CF 已解、`cf_clearance` 到手**（shim 日志 `cf_clearance=YES`）；失败在 `download.py` 用 `curl_cffi` **回放**那一步 —— **RSC 把 `cf_clearance` 绑 JA3/TLS 指纹**，curl_cffi 的 JA3 ≠ 真 Chrome，故回放仍 403。换 byparr/FlareBypasser 同链同理救不了 RSC；**真解 = 浏览器内直下 PDF**（而非「解挑战→cookie 回放」范式）。这正是 ACS 可救、RSC 难越的分水岭：**是否把 cf_clearance 绑 TLS 指纹**。
-- 且 batch6 口径下 **RSC 净 MISS≈0**（3 条最终仍被 websearch 从别处免费副本兜回、只是没走 FS 路），**为 RSC 单独上 CF 破盾边际收益≈0**。
+**难越桶（RSC）——FS 回放仍 403；route-B 是另一条线**：`pubs.rsc.org` 整站 Cloudflare。-145 FS run 里 RSC `articlepdf` 均 `flaresolverr_failed`（**cf_clearance 绑 JA3**，curl_cffi 回放仍 403）。
+- **限定表述**：**FS+curl_cffi 对 RSC ROI≈0**（不值得单独上 FS 破盾链）；**不等于「RSC 全无免费增量」**——**route-B 浏览器内直下**对金 OA 子集仍有 +N（N.8 机制通；MDPI7 已兑现；RSC 待 governor/A 集）。
 （证据：`选型2026-RSC-Cloudflare挑战绕行方案.md` TL;DR / §二；`检索成果-batch4-失败分桶与可回收分析.md` A 类桶；-145 `out/recover_b4_cf/` FS 日志 `flaresolverr_failed` × 3 RSC）
 
 ---
@@ -117,12 +119,13 @@ batch6「非 Elsevier 长尾 9 条」经 -143 实跑核验（`out/recover_b6_tai
 
 | 桶 / 出版商 | 墙类型 | 免费手段实测 | 可救性 / 杠杆 |
 |---|---|---|---|
-| **ACS-authorchoice**（10.1021 OA） | Cloudflare JS 质询(403) | 候选齐全；FS 解 CF→curl_cffi 回放成功（ACS 不绑 JA3） | ✅ **可救**：-145 实测 `acscatal.0c01253` 落 4.41MB PDF |
-| **AIP / Wiley / OUP / T&F 长尾** | Cloudflare(403) | 候选齐全、只差过 CF | ✅ **可救**：FlareSolverr（batch6 长尾桶杠杆更正） |
-| **ResearchGate / ChemRxiv（逃生口）** | Cloudflare(403) | 自存稿/预印本兜底亦被 CF 封 | ⚠️ 需 FlareSolverr；否则免费兜底口也堵 |
-| **RSC**（10.1039） | Cloudflare「Just a moment」 | FS 已拿 cf_clearance，但 curl_cffi 回放仍 403（RSC 绑 JA3/TLS） | ❌ **难越**（真解须浏览器内直下）；且 batch6 净 MISS≈0→不值得单独上 |
-| **Elsevier / ScienceDirect**（10.1016） | IP/登录墙（**非 CF**） | browser_search 0/10、wayback 0/12 | ❌ **免费到顶**：唯机构订阅可破 |
-| **ACS/RSC 纯订阅刊 403** | 真付费墙 | http-403 里 ACS80+RSC41=121(81%) | ❌ 免费物理边界：机构订阅 / 商业 API |
+| **ACS-authorchoice**（10.1021 OA） | Cloudflare JS 质询(403) | FS 可下到 PDF；**QC 净增真正文 ≈1**（≈93% SI 陷阱） | ⚠️ **机制可救 ≠ 正文净增** |
+| **AIP / Wiley / OUP / T&F 长尾** | Cloudflare(403) | 候选齐全、只差过 CF | ✅ **可救**：FlareSolverr（OA 子集） |
+| **ResearchGate / ChemRxiv（逃生口）** | Cloudflare(403) | 自存稿/预印本兜底亦被 CF 封 | ⚠️ 需 FlareSolverr |
+| **RSC**（10.1039） | Cloudflare「Just a moment」 | FS 回放 403（绑 JA3）；**route-B 金 OA +N** | ⚠️ **FS ROI=0**；route-B 另线 |
+| **Elsevier / ScienceDirect**（10.1016） | IP/登录墙（**非 CF**） | browser_search 0/10、wayback 0/12 | ❌ **免费到顶** |
+| **ACS/RSC 纯订阅刊 403** | 真付费墙 | http-403 订阅主体 | ❌ A5 / 商业 API |
+| **MDPI**（10.3390） | Akamai | **route-B 已回写 7** | ✅ **已兑现** |
 
 ---
 
@@ -135,11 +138,11 @@ batch6「非 Elsevier 长尾 9 条」经 -143 实跑核验（`out/recover_b6_tai
 5. `检索成果-batch4-失败分桶与可回收分析.md` —— A 类+CF 桶（Elsevier55/ACS12/Wiley7/RSC4）、`cloudflare-challenge(403)` 519 次。
 6. `检索成果-数据-失败原因分析.md` —— http-403 里 ACS80+RSC41=121(81%) 真付费墙；免费源不应硬刚部分。
 7. **本人实测（-149）**：`out/recover_b6_els_wayback/`（wayback Elsevier A 0/12）、`recover_b6_els_wayback_input.txt`（12 条清单）；`tools/qc_content_match.py` + `out/qc_content_report.{json,md}`（websearch 假阳 A=68.5% / B=56.0%，见 §〇补）。
-9. **内容审计产物（150 沉淀所引，均在 `out/`）**：`qc_content_report.{json,md}`（645 条复扫、四类系统性模式）、`qc_uncertain_sample_verify.{csv,md}`（-153 人校 40/40=100% 错）、`qc_merge_highconf_wrong.csv`(54)/`qc_merge_union_wrong.csv`(391)/`qc_merge_151match_url_conflict.csv`(16)/`qc_rejected_manifest.csv`(391)、`coverage.json`（净 448/999≈44.8%）。
-8. **-145 实测（`out/recover_b4_cf/`，run 进行中）**：ACS `10.1021/acscatal.0c01253` FS 真解落 4.41MB PDF；RSC `C1GC15503B/C5CC01545F/D5CY00880H` FS 已拿 cf_clearance 但 curl_cffi 回放 403（绑 JA3）。其 `flaresolverr_recovered` 的 `jaad.org`(对应 `cssc.201601217`) 与本轮 QC 假阳样例吻合 → FS 成功≠正确全文。
+9. **内容审计产物**：`qc_content_report.*`、`coverage.json`（**当前 326/999=32.63% @12:50:24**；340/34.03%@00:42:19 为历史）。
+8. **-145 实测（`out/recover_b4_cf/`）**：ACS FS 机制样本；RSC FS 回放 403（绑 JA3）；**FS 成功 ≠ 正确全文**（cssc→jaad 铁证）。
 
 ---
 
-*核验 2026-07-02｜-149｜工单「回收实测结论-CF与免费路线到顶（沉淀）」｜结论：CF 桶（ACS/长尾）可经免 Docker FlareSolverr 救、RSC 难越；Elsevier 及订阅刊真 403 免费到顶（browser_search 0/10 + wayback 0/12）。*
+*定版回填 2026-07-03｜-154 原稿 340/659@00:42:19 → 已 re-align 至 **326/673@12:50:24**（169 承总指挥 (a)）｜对齐《回收交付定稿核对-154》四项缺口｜免费物理到顶 ~33%。*
 
-*补记 2026-07-02｜-150｜工单「沉淀本轮最大发现：websearch 假阳 QC 全过程 + JA3/straggler/免费天花板」（taskId=`task-8cbd3c65…`）｜新增 §〇补（websearch 假阳错论文 + 双法定案 + 净覆盖 448/999≈44.8% 修正）并回填证据索引 8/9；同源可检索详版落经验记录 **L 节**、straggler CF 感知修复落 **H.2**。纯沉淀既有 out/ 审计产物与文档，未改任何 `.py`/PDF/metadata。*
+*补记 2026-07-02｜-150｜§〇补 websearch 假阳 QC 全过程；straggler 见 H.2。*

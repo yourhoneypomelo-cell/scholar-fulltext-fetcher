@@ -2,6 +2,8 @@
 
 > 数据源:`out/batch4_p1..p5/{metadata.jsonl, pdfs/, summary.json}`,由 `tools/aggregate_batch4.py` 去重汇总,落盘 `out/batch4_aggregate.json`(`final=true`)。
 > 生成方式:纯离线只读 + 生成(不联网、不改抓取源码)。基线对照:batch6 = 410/500 = 82.0%。
+>
+> ⚠️ **净覆盖率口径统一（173 冻结）**：本文 **69.6%（348/500）**是 **batch4 单批·metadata 声称成功**口径（含 websearch 抓错论文假阳），**既非全库、也非内容 QC 后净覆盖**。**全库内容 QC 后真净覆盖（唯一权威）= `out/coverage.json`：326 success / 673 miss / 999 = 32.63%**（generated_ts 2026-07-03 12:50:24, allow=10；388/611/38.84% 为【历史】）。口径不同勿混用；详见 **《基线口径冻结说明-388-173.md》**。
 
 ## 0. 一句话结论
 

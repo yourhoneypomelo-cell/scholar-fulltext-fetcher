@@ -4,6 +4,8 @@
 > 口径:**严格诚实、以 PDF 全页内容为准**。复用生产门 `download._content_qc_verdict / _content_qc_non_article_reject`(与 pipeline 完全同逻辑)+ 全页稳健重分类交叉核验。
 > 纯读 out/ 与 PDF,**不改任何核心码、不动任何 PDF/metadata**。数据源:`out/rerun_acs_144/fetch/metadata.jsonl`(-144 跑批产物)。
 > 关联:经验记录 **M.1③**(acs-authorchoice 5/5 全 SI)、**M.2 / N.5**(跑批 success 率 ≠ 真全文净增)、**N.3**(ACS 不绑 JA3)、`本波回收交付汇总.md`(acs 桶待补数据)。
+>
+> ℹ️ **净覆盖率口径（173 冻结）**：本文为 ACS 桶**批次级**真净增 / SI 假阳结算（N=4、M=52 等为该批数字，**非全局净覆盖**）。**全局净覆盖唯一权威 = `out/coverage.json` `summary`：326 success / 673 miss / 999 = 32.63%**（generated_ts 2026-07-03 12:50:24, allow=10；388/611/38.84% 为【历史】；本文 ACS 批次级结算 4 条/allow13 为成文历史，-149 后修为 1 真正文）。见 **《基线口径冻结说明-388-173.md》**。
 
 ---
 

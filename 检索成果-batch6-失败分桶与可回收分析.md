@@ -2,6 +2,8 @@
 
 > ⚠️ **2026-07-02 刷新**：本文取代 **7/1 11:56 旧 run（success 69/500 = 13.8%，MISS 431）** 的分析，现依据 **7/1 13:40 run（累计 success 410/500 = 82%，MISS 90）** 全量重算。旧口径的 A=86 / B=149 / C=196 已作废，新旧对比见 §〇。
 >
+> ⚠️ **净覆盖率口径统一（173 冻结）**：本文 **82%（410/500）**是 **batch6 单批·metadata 声称成功**口径（含 websearch 抓错论文假阳），**既非全库、也非内容 QC 后净覆盖**。**全库内容 QC 后真净覆盖（唯一权威）= `out/coverage.json`：326 success / 673 miss / 999 = 32.63%**（generated_ts 2026-07-03 12:50:24，allow_override=10）。口径不同勿混用；详见 **《基线口径冻结说明-388-173.md》**。
+>
 > 刷新者：谷歌学术人机认证-176（worker）｜原分析者：谷歌学术人机认证-154｜任务：`task-d9b473e6-ac1c-47e3-847a-d4dc295c218f`
 > 数据口径：`out/batch6/{summary.json, results.csv, metadata.jsonl, attempts.jsonl}`（纯离线只读）。`metadata.jsonl` 因断点续跑累计 1356 行，按 DOI 去重为 500 唯一：success 取"曾成功"并集，miss 取末次记录。
 > 说明：本次仅刷新本 md，未改动任何 `.py` 或其它文件。

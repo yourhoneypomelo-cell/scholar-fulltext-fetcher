@@ -5,6 +5,8 @@
 > 边界：**纯读审计**——只读 `out/_qc_union_translate_candidates_151.csv` + 各 `out/*/metadata.jsonl` + `out/*/pdfs/*.pdf`；**复用生产内容 QC 门**（`download._extract_pdf_text_meta / _pdf_page_count / _qc_matchers / _content_qc_verdict / _content_qc_non_article_reject`，O.5 模式，绝不重造判定）；**只新写** `out/_t0_prescreen_99_148.csv` + 本 md，**未改任何核心 `.py`、未回写 coverage、未跑网络**。
 > 定位：**预筛 ≠ 终裁**。终裁归 **-147**（`tools/regress_qc_union_189.py` + 人核）；本文把 99 条按生产门证据分档，给 -147 一份可直接执行的清单 + 诚实预期净增。承 `检索成果-still_missing回写后561分桶与下一波ROI-142.md` §三（129 待裁池 = 30 ACS confirmed_bad + 99 PENDING）。
 > 环境：pypdf 3.17.4 + rapidfuzz 3.14.5（门全活、非 no-op）；qc backend=rapidfuzz，match_hi=70 / mismatch_lo=50。
+>
+> ⚠️ **净覆盖率口径统一（173 冻结）**：本文基线 **379/999** 及推算 **384/391（39.1%）** 均为**【历史口径】**（早于 388 重建）。**【历史快照】当前权威见 `out/coverage.json`：326 success / 673 miss / 999 = 32.63%**（generated_ts 2026-07-03 12:50:24, allow_override=10）。99 条逐条 QC 分档与预期净增仍有效；**T0 终裁以 -147 为准（采纳 3 条、驳回 1.5053761）**，见冻结说明 §三。唯一权威见 **《基线口径冻结说明-388-173.md》**。
 
 ---
 

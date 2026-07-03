@@ -1,5 +1,6 @@
 # fulltext_fetcher 打包描述(PEP 621)。纯新增,不改动任何既有代码。
-# 依赖参考:fulltext_fetcher/requirements.txt(运行期仅 requests)。
+# 依赖参考:核心运行期硬依赖仅 requests(fulltext_fetcher/requirements.txt);生产免费主路径另需
+#   [qc](内容 QC 默认 fail-closed),强 CF/route-B 站另需 [cf]/[browser]——见下方 optional-dependencies。
 # 版本对齐 fulltext_fetcher/__init__.py 的 __version__(如升版本请两处同步)。
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
@@ -33,7 +34,17 @@ render = ["playwright"]
 # title,rapidfuzz 做标题模糊匹配,拦"下到错论文"的系统性假阳。**默认 fail-closed**:需过门却缺 pypdf
 # → 拒收不落盘(见 config.content_qc_require_deps),故这两者是内容 QC 的关键依赖,非纯装饰。
 # 下限取当前已验证版本(pypdf 3.17.4 / rapidfuzz 3.14.5)对应的稳妥下界;安装:pip install fulltext_fetcher[qc]。
+# 注:pypdf 上不封顶,实测 6.x 亦通过 build_coverage --selftest(COVERAGE_OK)。
 qc = ["pypdf>=3.17", "rapidfuzz>=3.0"]
+# route-B / FlareSolverr-shim / MDPI·RSC 强 CF 站:浏览器内取字节(render_fetch / browser_search /
+# institutional.route_b_bridge / tools/flaresolverr_nodriver 均函数内延迟导入,缺则相关路径优雅 no-op,不崩)。
+# ⚠️ nodriver 为 AGPL-3.0(许可证传染,见《谷歌学术爬虫-架构与选型.md》§8)且需有头 Chrome 环境。
+browser = ["nodriver>=0.35"]
+# CF/TLS 指纹增强(http_client 的 FTF_IMPERSONATE_HTTP=1 / download / websearch / wayback 延迟导入;
+# 缺则降级普通 requests,CF-soft 站命中率降,不崩)。
+cf = ["curl_cffi>=0.6"]
+# 生产全量一键装齐(免费主路径 QC + CF 增强 + route-B 浏览器 + xlsx 输入):pip install "fulltext_fetcher[full]"。
+full = ["fulltext_fetcher[qc,cf,browser,xlsx]"]
 
 [project.scripts]
 # setuptools 生成的入口会执行 sys.exit(main());cli.main 返回 int 即作退出码,无需改 cli.py。

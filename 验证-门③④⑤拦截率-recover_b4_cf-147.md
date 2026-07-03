@@ -5,6 +5,8 @@
 > 边界：**只读**。仅读 `out/recover_b4_cf*` 的 metadata.jsonl 与落盘 PDF；未改任何 `.py`/metadata/PDF。
 > **v2 重要更新**：分析期间 `fulltext_fetcher/download.py` 被并发落地——**门④⑤ + §9.2 源强制 + §9.6 非正文先于 DOI 强正 已实现**。本文数据据**已落地真门 end-to-end** 复跑（非纸面推演）。
 > 复现脚本（只读）：`_tmp_verify_gate_live_147.py`（真门 end-to-end）、`_tmp_verify_gates345_147.py`（门规则单测）、`_tmp_verify_escape_mech_147.py`（逃逸机制拆分）。pypdf 3.17.4 / rapidfuzz 3.14.5。
+>
+> ℹ️ **净覆盖率口径（173 冻结）**：本文为门③④⑤**拦截率/误杀**验证（51 条 SI 假阳等为**批次级**证据，非全局净覆盖）。这些假阳正是净覆盖须扣除的对象。**全局净覆盖唯一权威 = `out/coverage.json`：326 success / 673 miss / 999 = 32.63%**（generated_ts 2026-07-03 12:50:24, allow=10；388/611/38.84% 为【历史】）。见 **《基线口径冻结说明-388-173.md》**。
 
 ---
 

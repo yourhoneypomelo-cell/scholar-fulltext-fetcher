@@ -4,6 +4,8 @@
 > 边界：**纯文档、只新建本 1 份 md，不改任何 `.py`/PDF/metadata、不联网抓正文**。数据取自仓内已提交文档与源码 + 2026-07-01/02 GitHub/PyPI/评测核验。
 > 关系：本文承接 -179《FlareSolverr免Docker-仓内nodriver-shim实测》、-176《RSC-Cloudflare绕行》、-149《回收实测结论-CF与免费路线到顶》、-153《采纳与淘汰总表》里反复点名却始终"列 P2 未定量"的**「浏览器内直接下 PDF」**路线，给它一次性做 ROI 定量收口。
 > 一句话定位：**路线B 不是从零选型——仓内 `download.py::_nodriver_fetch_pdf_bytes`（第⑥层）已实现「有头真 Chrome 页内 CDP 下 PDF」并在 MDPI/Akamai 实网验证过；本文回答的是「把它扩到 CF/JA3/viewer 桶值不值、增量多大、要花多少」。**
+>
+> ⚠️ **净覆盖率口径统一（173 冻结）**：本文涉及的 still_missing 桶规模为成文时旧快照，属**【历史口径】**。**当前权威 = `out/coverage.json` `summary`：326 success / 673 miss / 999 = 32.63%**（generated_ts 2026-07-03 12:50:24，allow_override=10）。路线B 的 ROI/增量结论仍有效，唯 still_missing 总数以 673 为准。唯一权威见 **《基线口径冻结说明-388-173.md》**。
 
 ---
 

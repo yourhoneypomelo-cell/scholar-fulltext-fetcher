@@ -23,10 +23,15 @@
   RUNROOT/still_missing.txt 仍缺 DOI 全集(可直接作下一轮 -f 输入)
   RUNROOT/run_all_summary.json 本次编排的机器可读总结
 
+文件命名(一键正门默认统一):PDF **默认**以 {year}_{author}_{title}_{doi} 统一模板命名(人类可读 + 可
+  溯源),元数据缺失优雅降级、全缺以 {doi} 兜底(等价旧 DOI 净化名,零回归);全部落到 RUNROOT/fetch/pdfs/
+  单一文件夹。想退回纯 DOI 名:--naming-template "{doi}"。核心库 Config 仍默认 None(向后兼容),仅 run_all 这层默认统一。
+
 用法:
   python run_all.py -f inputs.txt --email you@uni.edu -o out/run_all
   python run_all.py "10.1371/journal.pone.0000217" "1706.03762" "Attention is all you need" -o out/run_demo
   python run_all.py -f inputs.txt --no-resume            # 不做跨批已covered剔除(强制全跑)
+  python run_all.py -f inputs.txt --naming-template "{doi}"  # 退回旧版纯 DOI 净化名
   python run_all.py -f inputs.txt --route-b cf-only      # 一键路径启用路线B(JA3型强CF站浏览器内抓字节;需 nodriver+有头)
   python run_all.py -f inputs.txt --institutional        # 一键接入机构订阅直链源 publisher_direct(路线A;仅合法机构授权者)
   python run_all.py "10.1371/journal.pone.0000217" --explain 10.1371/journal.pone.0000217  # 读日志渲染该条逐源尝试链
@@ -46,6 +51,16 @@ from collections import Counter
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
+
+# ── 一键正门默认统一命名(与 -156 契约对齐;任务[全自动 E2E]:PDF 默认即人类可读、可溯源)──────
+# run_all 是「一键正门」,面向"输入 DOI/标题 → 出标准化命名的系列全文"的北极星目标,因此**默认就开
+# 统一命名**:{year}_{author}_{title}_{doi}。元数据(年/首作者姓/标题)缺失时 build_filename 优雅降级、
+# 全缺则以 {doi} 兜底(等价旧 DOI 净化名),故对"只有 DOI 可解析"的条目落盘名与旧行为一致、零回归。
+# 注:**核心库 Config.naming_template 仍默认 None(逐字节向后兼容,零副作用)**;只有 run_all 这一层
+# 把默认切成统一模板——单条 `python -m fulltext_fetcher` 不受影响。想退回纯 DOI 名:--naming-template "{doi}"。
+# coverage/续跑对文件名不敏感(build_coverage 只按 metadata 的 pdf_path basename 对盘,非按 DOI 形状),
+# 故切换命名模板不影响任何 coverage / KPI / 续跑口径(已核 tools/build_coverage.py:real=claimed and bn in pdfs)。
+DEFAULT_NAMING_TEMPLATE = "{year}_{author}_{title}_{doi}"
 
 
 def _load_build_coverage() -> Any:
@@ -218,6 +233,87 @@ def write_detail_tsv(path: str, rows: List[Dict[str, str]]) -> None:
             f.write("\t".join(_tsv_cell(row.get(c)) for c in _DETAIL_COLUMNS) + "\n")
 
 
+# ── 可复现覆盖口径(总指挥176 补充要求;与 144 对齐)────────────────────────────────────
+# 背景(审计145):头条 326 是人工 extra-dirs 口径、一键 run_all 默认 flat 出 312 且不写全局盘 →
+# "交付报告的数复现不出 + 漂移"。本组把**一键 run 报告的净覆盖数**做成【从隔离 RUNROOT 独立、
+# 确定性复现】:
+#   ① 固定 caliber:隔离 -o + flat-only 扫描 + QC(highconf∪union)+ verify_allow=on,显式落进 summary;
+#   ② QC 快照:把本次实际消费的 QC 黑名单 CSV 复制进 RUNROOT/qc_snapshot/ 并记 sha256+行数
+#      —— 否则全局 out/qc_*.csv 日后变动会让【同一 RUNROOT】重算出不同净数(漂移根因);
+#   ③ 自证复现:python run_all.py --verify -o RUNROOT 用快照就地重算,断言 == 原报数,退 0/1。
+# 注:caliber 细节(是否并入 manifest/uncertain、flat vs extra-dirs)以 144 牵头定稿为准;本实现把
+# "锁定并可复现"的机制做实,caliber 常量集中在 _REPRO_CALIBER,便于按 144 结论一处切换、不改主流程。
+_REPRO_CALIBER = {
+    "scope": "isolated-runroot",       # 隔离 -o:只对本 RUNROOT 负责,绝不触全局权威盘(红线)
+    "scan": "flat-only",               # 只扫一级(RUNROOT/fetch),与 build_coverage 默认权威口径一致
+    "qc": "highconf-union",            # 消费 <coverage-root>/qc_merge_{highconf,union}_wrong.csv
+    "verify_allow_openbook": True,     # 回写开卷门(no-false-kill)
+}
+_QC_SNAPSHOT_DIRNAME = "qc_snapshot"
+
+
+def _sha256_file(path: str) -> Optional[str]:
+    """文件 sha256(十六进制);不存在/读失败 → None。用于 QC 黑名单快照的内容指纹(防漂移佐证)。"""
+    import hashlib
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
+def _count_lines(path: str) -> Optional[int]:
+    """文件非空行数(粗略佐证快照规模);读失败 → None。"""
+    try:
+        with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
+            return sum(1 for ln in f if ln.strip())
+    except OSError:
+        return None
+
+
+def snapshot_qc_files(runroot: str, qc_files: List[Tuple[str, str]]) -> Dict[str, Any]:
+    """把本次消费的 QC 黑名单 CSV 复制进 RUNROOT/qc_snapshot/,记录 {role,src,exists,snapshot,sha256,lines}。
+
+    qc_files: [(role, abs_path)];仅复制真实存在者(缺失记 exists=False)。返回可 JSON 序列化的快照
+    清单(供 --verify 就地复现 + 审计佐证)。复制/读失败优雅降级(退回对源文件取指纹),绝不阻断主流程。"""
+    import shutil
+    snap_dir = os.path.join(runroot, _QC_SNAPSHOT_DIRNAME)
+    entries: List[Dict[str, Any]] = []
+    made = False
+    for role, src in qc_files:
+        if not src or not os.path.isfile(src):
+            entries.append({"role": role, "src": (src or "").replace("\\", "/"),
+                            "exists": False, "snapshot": None, "sha256": None, "lines": None})
+            continue
+        if not made:
+            os.makedirs(snap_dir, exist_ok=True)
+            made = True
+        dst_name = "%s__%s" % (role, os.path.basename(src))
+        dst = os.path.join(snap_dir, dst_name)
+        try:
+            shutil.copyfile(src, dst)
+        except OSError:
+            dst = None
+        entries.append({
+            "role": role, "src": src.replace("\\", "/"), "exists": True,
+            "snapshot": (os.path.join(_QC_SNAPSHOT_DIRNAME, dst_name).replace("\\", "/")) if dst else None,
+            "sha256": _sha256_file(dst or src),
+            "lines": _count_lines(dst or src),
+        })
+    return {"dir": _QC_SNAPSHOT_DIRNAME, "files": entries}
+
+
+def _snapshot_role_path(runroot: str, repro: Dict[str, Any], role: str) -> Optional[str]:
+    """从 summary.reproducibility.qc_snapshot 取某 role 的快照文件绝对路径(供 --verify 复算用);无则 None。"""
+    for ent in ((repro.get("qc_snapshot") or {}).get("files") or []):
+        if ent.get("role") == role and ent.get("snapshot"):
+            return os.path.join(runroot, ent["snapshot"].replace("/", os.sep))
+    return None
+
+
 def _force_utf8_console() -> None:
     """Windows 控制台默认 GBK 会把中文一页式总结/逐条明细打成乱码,伤"只读日志即可判断"。
     尽力把 stdout/stderr 切到 UTF-8(与 tools/build_coverage._force_utf8_console 同款);
@@ -310,6 +406,10 @@ def _render_page_lines(p: Dict[str, Any]) -> List[str]:
     L.append("run_all_summary : %s" % p["run_all_summary"])
     if p.get("run_all_log"):
         L.append("run_all.log     : %s  (本页快照;只读此文件即可判断每条成败/命中源/失败原因/PDF 路径)" % p["run_all_log"])
+    if p.get("reproducibility"):   # 可复现自证(总指挥176):caliber 固定 + QC 快照 + --verify 断言净数可复现
+        _rp = p["reproducibility"]
+        L.append("可复现口径     : %s" % json.dumps(_rp.get("caliber") or {}, ensure_ascii=False))
+        L.append("复现自证       : %s  (断言净数==本页,退 0/1)" % _rp.get("verify_cmd", ""))
     L.append(line)
     return L
 
@@ -535,6 +635,66 @@ def run_explain(doi_raw: str, runroot: str, coverage_root: str, bc: Any) -> int:
     return 0 if events else 1
 
 
+# ── 可复现自证:--verify 从隔离 RUNROOT 确定性复现它自己报告的净覆盖数(总指挥176 补充要求)──────
+def run_verify(runroot: str, bc: Any) -> int:
+    """读 RUNROOT/run_all_summary.json 取原报数 + QC 快照,用【快照】QC 黑名单(而非全局 out/,防漂移)
+    对 RUNROOT 就地重算 coverage(flat-only + verify_allow),断言 (total/success/miss) == 原报数;
+    并校验快照 sha256 未被篡改。全程只读重算、不落盘、不联网。返回 0(复现一致)/ 1(不一致或缺产物)。"""
+    summ_path = os.path.join(runroot, "run_all_summary.json")
+    if not os.path.isfile(summ_path):
+        print("run_all --verify: 未找到 %s(先跑一次 run_all 生成产物)" % summ_path, file=sys.stderr)
+        return 1
+    try:
+        with open(summ_path, "r", encoding="utf-8") as f:
+            summ = json.load(f)
+    except (OSError, ValueError) as e:  # noqa: BLE001
+        print("run_all --verify: 读 summary 失败:%r" % e, file=sys.stderr)
+        return 1
+
+    reported = summ.get("coverage") or {}
+    repro = summ.get("reproducibility") or {}
+    use_qc = bool((summ.get("qc") or {}).get("enabled", True))
+
+    # ① 快照完整性:sha256 未变(全局黑名单漂移不影响本 RUNROOT 复现,但快照本身被改则告警)
+    integrity_ok = True
+    for ent in ((repro.get("qc_snapshot") or {}).get("files") or []):
+        rel = ent.get("snapshot")
+        if not rel:
+            continue
+        cur = _sha256_file(os.path.join(runroot, rel.replace("/", os.sep)))
+        if ent.get("sha256") and cur != ent.get("sha256"):
+            integrity_ok = False
+            print("run_all --verify: [WARN] QC 快照被改动 %s(sha256 不符)" % rel)
+
+    # ② 用快照 QC 就地重算(flat-only + verify_allow;write=False 不落盘);快照缺失→退回默认路径(与原跑一致)
+    snap_hard = _snapshot_role_path(runroot, repro, "qc_hard")
+    snap_soft = _snapshot_role_path(runroot, repro, "qc_soft")
+    cov = run_coverage(bc, runroot, use_qc=use_qc,
+                       qc_hard_path=snap_hard, qc_soft_path=snap_soft, write=False)
+    s = cov["summary"]
+    got = {"total_unique_dois": s["total_unique_dois"], "success": s["success"], "miss": s["miss"]}
+    want = {"total_unique_dois": reported.get("total_unique_dois"),
+            "success": reported.get("success"), "miss": reported.get("miss")}
+    match = all(got[k] == want[k] for k in got)
+
+    bar = "=" * 72
+    lines = [
+        bar,
+        "run_all --verify  (RUNROOT=%s)" % runroot,
+        "caliber        : %s" % json.dumps(repro.get("caliber") or _REPRO_CALIBER, ensure_ascii=False),
+        "原报(summary)  : 唯一 %s | 净成功 %s | miss %s" % (
+            want["total_unique_dois"], want["success"], want["miss"]),
+        "复算(snapshot) : 唯一 %s | 净成功 %s | miss %s" % (
+            got["total_unique_dois"], got["success"], got["miss"]),
+        "QC 快照完整性  : %s" % ("OK" if integrity_ok else "CHANGED"),
+        "复现结论       : %s" % (
+            "REPRODUCIBLE(数一致)" if (match and integrity_ok) else "MISMATCH(不一致)"),
+        bar,
+    ]
+    print("\n" + "\n".join(lines) + "\n")
+    return 0 if (match and integrity_ok) else 1
+
+
 # ── 机构订阅(路线A)源顺序解析(补审计-147 G3)────────────────────────────────────
 # 抽成纯函数是为了让「--sources 覆盖 + 机构态自动补插 publisher_direct」这条口径可离线 selftest,
 # 且与核心 CLI(fulltext_fetcher/cli.py)逐字节对齐、绝不各起分叉。就地改 cfg.sources、不返回。
@@ -613,16 +773,21 @@ def build_parser() -> argparse.ArgumentParser:
                     help="路线B 浏览器无头运行(默认有头:过 CF/Akamai 通过率更高;无头需 xvfb 等虚拟显示)")
     ap.add_argument("--browser-pdf-wait", type=float, default=13.0,
                     help="路线B 有头浏览器过验证/渲染的等待秒(默认 13;--route-b all 时生效)")
-    # ── 文件命名模板(主线自定义命名·与 -156 契约对齐)────────────────────────────
-    # 默认不给 = DOI 净化名、落盘行为逐字节不变;给含占位符的模板即启用标准化命名(复用 scholar 命名逻辑:
-    # 净化/截断/去重同源、不重造)。run_all 只把它透传给 Config.naming_template(单一真源,同核心 CLI),
-    # 由 download 层落盘时消费(注入点见 fulltext_fetcher/download.py,默认分支逐字节不变)。
+    # ── 文件命名模板(主线自定义命名·与 -156 契约对齐;一键正门默认统一命名)──────────────
+    # **默认即统一命名** DEFAULT_NAMING_TEMPLATE = "{year}_{author}_{title}_{doi}"(见文件顶部说明):
+    # 一键正门直击北极星"输出文件名标准化的系列全文",故默认就给人类可读 + 可溯源的模板名;元数据缺失
+    # 优雅降级、全缺以 {doi} 兜底(等价旧 DOI 净化名,零回归)。给自定义模板即覆盖;退回纯 DOI 名传 "{doi}"。
+    # run_all 只把它透传给 Config.naming_template(单一真源,同核心 CLI),由 download 层落盘时消费
+    # (注入点见 fulltext_fetcher/download.py)。**注:核心库 Config.naming_template 仍默认 None(向后兼容),
+    # 只有 run_all 这一层默认切统一模板;单条 `python -m fulltext_fetcher` 不受影响。**
     # 契约固定:Config.naming_template / env FULLTEXT_NAMING_TEMPLATE / 占位符 {year}/{author}/{title}/{doi}/{venue}。
-    ap.add_argument("--naming-template", default=os.environ.get("FULLTEXT_NAMING_TEMPLATE"),
-                    help="可选文件命名模板(默认不给=DOI 净化名,落盘逐字节不变)。给含占位符的模板串即启用"
-                         "标准化命名,复用 scholar 命名逻辑(净化/截断/去重同源):占位符 "
-                         "{year}/{author}/{title}/{doi}/{venue},如 \"{year}_{author}_{title}\";"
-                         "字段缺失优雅降级、年作者标题全缺时以 DOI 兜底(默认取环境变量 FULLTEXT_NAMING_TEMPLATE)")
+    ap.add_argument("--naming-template",
+                    default=os.environ.get("FULLTEXT_NAMING_TEMPLATE") or DEFAULT_NAMING_TEMPLATE,
+                    help="文件命名模板(一键正门**默认即统一命名** \"%s\":人类可读 + 可溯源)。"
+                         "复用 scholar 命名逻辑(净化/截断/去重同源),占位符 {year}/{author}/{title}/{doi}/{venue};"
+                         "字段缺失优雅降级、年/作者/标题全缺时以 {doi} 兜底(等价旧 DOI 净化名,零回归)。"
+                         "覆盖:传自定义模板即可;退回**纯 DOI 名**用 --naming-template \"{doi}\";"
+                         "亦可用环境变量 FULLTEXT_NAMING_TEMPLATE 设默认" % DEFAULT_NAMING_TEMPLATE)
     # ── 日志驱动调试:--explain <doi> 渲染某条 DOI 的逐源→逐次尝试链(补审计-147 G1)──
     # 补最后一公里:此前想知道"某条为何 miss、各源分别怎么失败"仍需手读 fetch/attempts.jsonl(裸 JSON)。
     # 此开关读 attempts.jsonl(RUNROOT/fetch + --coverage-root 下各批)聚合该 DOI 的结构化事件,按时间
@@ -631,6 +796,12 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--explain", metavar="DOI",
                     help="日志驱动调试:读 attempts.jsonl 渲染某条 DOI 的逐源→逐次尝试链"
                          "(为何 miss/各源如何失败),打印并落 RUNROOT/explain_<doi>.txt。不联网、不下载、不改数据。")
+    # ── 可复现自证(总指挥176 补充要求)──────────────────────────────────────────────
+    # 一键 run 的净覆盖数必须能被【确定性复现】。--verify 读 RUNROOT/run_all_summary.json + qc_snapshot,
+    # 就地重算 coverage 并断言 == 原报数(退 0/1)。不联网、不下载、不改数据;与 -o(RUNROOT)配套使用。
+    ap.add_argument("--verify", action="store_true",
+                    help="确定性复现:用 RUNROOT/qc_snapshot 就地重算 coverage 并断言 == run_all_summary.json 原报数"
+                         "(净成功/miss/唯一DOI);退 0(一致)/1(不一致)。需配 -o RUNROOT;不联网/不下载/不改数据。")
     ap.add_argument("--selftest", action="store_true", help="离线自检后退出")
     return ap
 
@@ -642,6 +813,8 @@ def run(argv: Optional[List[str]] = None) -> int:
     bc = _load_build_coverage()
     if args.selftest:
         return _selftest(bc)
+    if args.verify:    # 可复现自证:用 RUNROOT/qc_snapshot 就地重算并断言 == 原报数(不联网/不下载/不改数据)
+        return run_verify(args.out, bc)
     if args.explain:   # 日志驱动调试:只读 attempts.jsonl 渲染某条 DOI 的尝试链(不联网/不下载/不改数据)
         return run_explain(args.explain, args.out, args.coverage_root, bc)
 
@@ -652,7 +825,11 @@ def run(argv: Optional[List[str]] = None) -> int:
 
     raw_inputs: List[str] = list(args.inputs)
     if args.input_file:
-        raw_inputs.extend(_read_input_file(args.input_file))
+        try:
+            raw_inputs.extend(_read_input_file(args.input_file))
+        except SystemExit as e:      # 读取层明确终态(不存在/损坏/缺 openpyxl):打印可读错误 + return 2,不裸 traceback
+            print(str(e), file=sys.stderr)
+            return 2
     if not raw_inputs:
         print("错误:未提供输入。示例:python run_all.py -f inputs.txt --email you@uni.edu -o out/run_all",
               file=sys.stderr)
@@ -745,6 +922,18 @@ def run(argv: Optional[List[str]] = None) -> int:
     cov_s = cov["summary"]
     qc_block = cov_s.get("qc") or {}
 
+    # ④b 可复现自证(总指挥176):把本次消费的 QC 黑名单快照进 RUNROOT/qc_snapshot/ + 记 caliber,
+    #     让 `--verify` 日后从隔离 RUNROOT 独立复算出**同一净数**(不受全局 out/qc_*.csv 漂移影响)。
+    qc_snapshot = (snapshot_qc_files(runroot, [("qc_hard", qc_hp), ("qc_soft", qc_sp)])
+                   if use_qc else {"dir": _QC_SNAPSHOT_DIRNAME, "files": []})
+    reproducibility = {
+        "caliber": dict(_REPRO_CALIBER, use_qc=use_qc),
+        "qc_snapshot": qc_snapshot,
+        "verify_cmd": "python run_all.py --verify -o %s" % runroot,
+        "note": ("隔离 RUNROOT 自证:--verify 用 qc_snapshot 就地重算,应 == 本 summary 的 "
+                 "coverage(total_unique_dois/success/miss);全局黑名单漂移不影响本 RUNROOT 复现。"),
+    }
+
     # ⑤ 逐条明细(输出层):从净口径 records 整理「每条 DOI 一行」→ 落可 grep 的 TSV + 进 payload/json
     detail_rows = build_detail_rows(cov.get("records") or [])
     detail_tsv = os.path.join(runroot, "run_all_detail.tsv")
@@ -793,6 +982,7 @@ def run(argv: Optional[List[str]] = None) -> int:
         "by_reason": by_reason,
         "records": detail_rows,
         "skipped_covered_samples": skipped_covered[:10],
+        "reproducibility": reproducibility,
     }
     with open(payload["run_all_summary"], "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
@@ -1050,24 +1240,111 @@ def _selftest(bc: Any) -> int:
     _apply_institutional_sources(_isrc, None)
     assert _isrc.sources.count("publisher_direct") == 1, _isrc.sources
 
-    # ⑫ 文件命名模板透传(与 -156 --naming-template 契约对齐:Config.naming_template / env FULLTEXT_NAMING_TEMPLATE)
-    #    默认不给 → None(旧 DOI 净化名、落盘逐字节不变);给模板 → 透传 Config;env 兜底。run_all 只透传、不消费。
-    assert _Cfg().naming_template is None, "Config 默认命名模板必须为 None(向后兼容)"
+    # ⑫ 文件命名模板透传(与 -156 --naming-template 契约对齐 + 一键正门默认统一命名)
+    #    关键口径:**核心库 Config 默认仍 None(逐字节向后兼容)**;只有 run_all 这层默认切统一模板
+    #    DEFAULT_NAMING_TEMPLATE="{year}_{author}_{title}_{doi}"。给模板 → 覆盖;env FULLTEXT_NAMING_TEMPLATE 优先于内置默认。
+    assert _Cfg().naming_template is None, "核心库 Config 默认命名模板必须仍为 None(向后兼容,单条 CLI 不受影响)"
+    assert DEFAULT_NAMING_TEMPLATE == "{year}_{author}_{title}_{doi}", DEFAULT_NAMING_TEMPLATE
     _prev_nt = os.environ.pop("FULLTEXT_NAMING_TEMPLATE", None)
     try:
-        assert build_parser().parse_args(["10.1/x"]).naming_template is None, "默认不给 → None(落盘行为不变)"
+        # 默认不给且无 env → 一键正门默认统一命名(而非 None):这是本波"建议默认就开统一命名"的落地点
+        assert build_parser().parse_args(["10.1/x"]).naming_template == DEFAULT_NAMING_TEMPLATE, \
+            "run_all 默认应为统一命名模板(建议默认就开统一命名)"
+        # 显式自定义模板 → 覆盖内置默认
         _a_nt = build_parser().parse_args(["10.1/x", "--naming-template", "{year}_{author}_{title}"])
         assert _a_nt.naming_template == "{year}_{author}_{title}", _a_nt.naming_template
         assert _Cfg(naming_template=(_a_nt.naming_template or None)).naming_template == \
             "{year}_{author}_{title}", _a_nt.naming_template
-        os.environ["FULLTEXT_NAMING_TEMPLATE"] = "{doi}"
-        assert build_parser().parse_args(["10.1/x"]).naming_template == "{doi}", \
-            "env FULLTEXT_NAMING_TEMPLATE 应作默认值(与核心 CLI 一致)"
+        # 退回纯 DOI 名(等价旧默认):--naming-template "{doi}"
+        _a_doi = build_parser().parse_args(["10.1/x", "--naming-template", "{doi}"])
+        assert _a_doi.naming_template == "{doi}", _a_doi.naming_template
+        # env FULLTEXT_NAMING_TEMPLATE 优先于内置默认(与核心 CLI 一致)
+        os.environ["FULLTEXT_NAMING_TEMPLATE"] = "{author}-{year}"
+        assert build_parser().parse_args(["10.1/x"]).naming_template == "{author}-{year}", \
+            "env FULLTEXT_NAMING_TEMPLATE 应优先于内置默认统一模板"
     finally:
         if _prev_nt is None:
             os.environ.pop("FULLTEXT_NAMING_TEMPLATE", None)
         else:
             os.environ["FULLTEXT_NAMING_TEMPLATE"] = _prev_nt
+
+    # ⑬ 可复现自证(总指挥176 补充要求):QC 快照(sha256/行数)+ --verify 从隔离 RUNROOT 独立复算净数 ==
+    #    原报数。造一个最小 RUNROOT(fetch/metadata.jsonl + pdfs + qc_snapshot union),验证:一致→0、
+    #    篡改报数→1(MISMATCH)、篡改快照→1(完整性)。全离线、临时目录,不动真实 out/。
+    assert "--verify" in build_parser().format_help(), "run_all 必须暴露 --verify(可复现自证)"
+    assert build_parser().parse_args(["--verify", "-o", "out/x"]).verify is True, "‑‑verify 应可解析"
+    #    _sha256_file/_count_lines:内容指纹 + 行数,缺文件→None
+    _dv = _tf.mkdtemp(prefix="run_all_verify_selftest_")
+    try:
+        _qc = os.path.join(_dv, "u.csv")
+        with open(_qc, "w", encoding="utf-8") as _f:
+            _f.write("doi\n10.1000/d2\n")
+        assert _sha256_file(_qc) and len(_sha256_file(_qc)) == 64, "sha256 应为 64 位 hex"
+        assert _sha256_file(os.path.join(_dv, "nope.csv")) is None, "缺文件 sha256→None"
+        assert _count_lines(_qc) == 2 and _count_lines(os.path.join(_dv, "nope.csv")) is None, _count_lines(_qc)
+        #    snapshot_qc_files:复制进 RUNROOT/qc_snapshot、记 sha256/行数;缺失项 exists=False
+        _rr = os.path.join(_dv, "RUN")
+        os.makedirs(_rr, exist_ok=True)
+        _snap = snapshot_qc_files(_rr, [("qc_hard", os.path.join(_dv, "absent.csv")), ("qc_soft", _qc)])
+        _byrole = {e["role"]: e for e in _snap["files"]}
+        assert _byrole["qc_hard"]["exists"] is False and _byrole["qc_hard"]["snapshot"] is None, _byrole["qc_hard"]
+        assert _byrole["qc_soft"]["exists"] is True and _byrole["qc_soft"]["sha256"] == _sha256_file(_qc), _byrole["qc_soft"]
+        assert os.path.isfile(os.path.join(_rr, _byrole["qc_soft"]["snapshot"].replace("/", os.sep))), _byrole["qc_soft"]
+
+        #    造 RUNROOT/fetch:d1 真成功(pdf 在盘)、d2 真成功但被 union 剔、d3 miss → 净成功 1/总 3/miss 2
+        _fetch = os.path.join(_rr, "fetch")
+        os.makedirs(os.path.join(_fetch, "pdfs"), exist_ok=True)
+        with open(os.path.join(_fetch, "metadata.jsonl"), "w", encoding="utf-8") as _f:
+            _f.write(json.dumps({"raw_input": "10.1000/d1", "doi": "10.1000/d1", "success": True,
+                                 "source_used": "unpaywall", "pdf_path": "out/RUN/fetch/pdfs/d1.pdf",
+                                 "pdf_bytes": 10}) + "\n")
+            _f.write(json.dumps({"raw_input": "10.1000/d2", "doi": "10.1000/d2", "success": True,
+                                 "source_used": "websearch", "pdf_path": "out/RUN/fetch/pdfs/d2.pdf",
+                                 "pdf_bytes": 10}) + "\n")
+            _f.write(json.dumps({"raw_input": "10.1000/d3", "doi": "10.1000/d3", "success": False,
+                                 "error": "no-candidates"}) + "\n")
+        open(os.path.join(_fetch, "pdfs", "d1.pdf"), "w").close()
+        open(os.path.join(_fetch, "pdfs", "d2.pdf"), "w").close()
+
+        def _write_summary(_success):   # 写一份 summary(coverage 报 _success)+ 复用上面的 union 快照
+            _payload = {
+                "coverage": {"total_unique_dois": 3, "success": _success, "miss": 3 - _success},
+                "qc": {"enabled": True},
+                "reproducibility": {"caliber": dict(_REPRO_CALIBER, use_qc=True), "qc_snapshot": _snap},
+            }
+            with open(os.path.join(_rr, "run_all_summary.json"), "w", encoding="utf-8") as _sf:
+                json.dump(_payload, _sf, ensure_ascii=False)
+
+        _write_summary(1)                         # 原报净成功 1(d2 被 union 剔)
+        assert run_verify(_rr, bc) == 0, "快照 union 剔 d2 → 复算净成功 1 == 原报 → 应 REPRODUCIBLE(0)"
+        _write_summary(2)                         # 原报净成功 2(错报)→ 复算仍 1 → MISMATCH
+        assert run_verify(_rr, bc) == 1, "复算净数与原报不一致 → 应 MISMATCH(1)"
+        _write_summary(1)                         # 改回一致,再验"快照被篡改"→ 完整性失败(1)
+        _snap_soft = os.path.join(_rr, _byrole["qc_soft"]["snapshot"].replace("/", os.sep))
+        with open(_snap_soft, "a", encoding="utf-8") as _f:
+            _f.write("10.1000/d1\n")              # 篡改快照(sha256 变)
+        assert run_verify(_rr, bc) == 1, "快照 sha256 被篡改 → 完整性失败 → 1"
+        #    缺 summary → 1(优雅失败,不抛)
+        assert run_verify(os.path.join(_dv, "NOPE"), bc) == 1, "缺 run_all_summary.json → 1"
+    finally:
+        _sh.rmtree(_dv, ignore_errors=True)
+
+    # ⑧ 输入健壮性(承 -167 + cli 修复):run_all 复用 cli._read_input_file——GBK 不崩、不存在文件走明确终态,
+    #    且 run() 调用点对读取失败 return 2(不裸 traceback+exit 1)。
+    import tempfile as _tf8
+    from fulltext_fetcher.cli import _read_input_file as _rif8
+    with _tf8.TemporaryDirectory() as _d8:
+        _pg = os.path.join(_d8, "gbk_runall.txt")
+        with open(_pg, "w", encoding="gbk") as _f8:
+            _f8.write("石墨烯综述\n10.1021/jacs.0c00000\n")
+        assert _rif8(_pg) == ["石墨烯综述", "10.1021/jacs.0c00000"], _rif8(_pg)
+        _nope = os.path.join(_d8, "nope_runall_selftest.txt")
+        try:
+            _rif8(_nope)
+            raise AssertionError("not-found 应抛 SystemExit(明确终态)")
+        except SystemExit as _e8:
+            assert "不存在" in str(_e8), str(_e8)
+        assert run(["-f", _nope]) == 2, "run() 对不存在输入文件应 return 2(非裸 traceback)"
 
     print("RUN_ALL_OK")
     return 0

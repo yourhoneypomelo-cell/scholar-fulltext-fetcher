@@ -3,6 +3,8 @@
 > 交付：**谷歌学术人机认证-143（worker）** → 总指挥 144｜2026-07-02
 > 任务：P1 still_missing 630 分桶统计刷新（publisher/CF/403），与 `检索成果-still_missing-CF-JA3桶ROI深挖-173.md` 对照是否漂移。
 > 边界：**只新建本 1 份 md，未改任何 `.py`**。数据源：`out/coverage.json`（@2026-07-02 12:13:09，权威口径）、`out/still_missing.txt`、`out/still_missing_shards/*`、全仓 `metadata.jsonl` + `attempts.jsonl` 并集。
+>
+> ⚠️ **净覆盖率口径统一（173 冻结）**：本文标题/正文的 **628 miss、371/999=37.1% net**（@12:13:09 快照）均为**【历史口径】**。**【历史快照】当前权威见 `out/coverage.json`：326 success / 673 miss / 999 = 32.63%**（generated_ts 2026-07-03 12:50:24, allow_override=10）。唯一权威 + 历史对照表 + 待并入项见 **《基线口径冻结说明-388-173.md》**。
 
 ---
 

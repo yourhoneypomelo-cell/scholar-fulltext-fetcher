@@ -40,9 +40,33 @@ env/
 serpapi*.txt
 proxies*.txt
 credentials.json
+# A5 机构订阅本地凭据 / Cookie（占位模板 .example 不受影响、可入库）
+.ftf_*.local.json
 
 # ===== 编辑器 / 系统 =====
 .DS_Store
 Thumbs.db
 .idea/
 .vscode/
+
+# ===== 仓根临时脚本/探针 & 其产物（并发 worker 高频产出，可复现、不入库；文件留磁盘）=====
+# 根锚定（前导 /）：仅忽略仓根，绝不影响 fulltext_fetcher/ · tools/ · tests/ · run_all*.py 等生产码/交付。
+# 已跟踪文件不受 .gitignore 影响；确需入库某临时件用 `git add -f`。archive/ 隔离区不在此忽略（留待入库决定）。
+/_*.py
+/_*.txt
+/_*.json
+
+# ===== 实验归档桶 & 杂散虚拟环境（near-clean：留磁盘、不入库）=====
+# 如日后想把 archive/ 实验史入 git 留证，删下面 /archive/ 一行并 `git add -f archive/`。
+/archive/
+.venv*/
+
+# ===== 仓根一次性输入/探针/临时数据散件（会话临时·可复现·不入库；文件留磁盘）=====
+# 根锚定：仅忽略仓根散件，不影响 examples/ 下交付样例、生产码与交付文档(.md)。
+/*_input.txt
+/recover_*.txt
+/routeB_*.txt
+/batch7_*.txt
+/subset_*.txt
+/titles_probe*
+/fs_shim_*.py

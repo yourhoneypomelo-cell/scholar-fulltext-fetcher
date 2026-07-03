@@ -1,0 +1,19 @@
+# examples/sample_dois.txt —— 一键正门小样输入
+#
+# 一行一条：DOI / arXiv id / 论文标题 均可混排；# 开头为注释行（跳过）。
+# 运行（在仓库根目录）：
+#   python run_all.py -f examples/sample_dois.txt --email you@uni.edu -o out/example_run
+# 跑完看终端「一页式总结」；PDF 落 out/example_run/fetch/pdfs/（统一命名），
+# 仍缺的在 out/example_run/still_missing.txt。
+#
+# —— 开放获取（应成功，演示统一命名 {year}_{author}_{title}_{doi}）——
+10.1371/journal.pone.0000217          # PLOS ONE，金色 OA
+10.7717/peerj.4375                     # PeerJ，金色 OA（Piwowar OA 研究）
+10.1038/s41467-019-09234-6             # Nature Communications，金色 OA
+1706.03762                             # arXiv：Attention Is All You Need
+# —— 标题输入（触发 resolve + websearch 兜底；与上一行同篇，演示输入内去重）——
+Attention is all you need
+# —— 订阅墙（应 miss → 进 still_missing，演示失败终态）——
+10.1038/nature14539
+# —— 坏 DOI（应 resolve-fail / no-source）——
+10.9999/nonexistent.doi.20260703

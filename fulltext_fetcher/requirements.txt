@@ -1,3 +1,39 @@
 # fulltext_fetcher 运行依赖
-# 仅依赖 requests;其余均为 Python 3.8+ 标准库(argparse/concurrent.futures/json/logging 等)。
+# ---------------------------------------------------------------------------
+# 运行期【硬依赖】仅 requests;其余均为 Python 3.8+ 标准库(argparse/concurrent.futures/
+# json/logging/asyncio 等)。所有"扩展组"缺失时对应路径【优雅降级、不崩】。
+# 权威依赖定义见仓根 pyproject.toml 的 [project.optional-dependencies];
+# 推荐用 extras 安装(而非本文件): pip install -e ".[qc]" / ".[full]"。
+# ---------------------------------------------------------------------------
+
+# 【硬依赖】—— 最小可跑(多源 OA 定位 + HTTP 直下)
 requests>=2.28
+
+# 【可选扩展】—— 需要对应能力时再装(取消注释,或改用 pip install -e ".[组名]")
+#
+# 生产免费主路径【强烈建议】:内容 QC 门(拦"下到错论文"假阳,默认 fail-closed)
+#   pip install -e ".[qc]"
+# pypdf>=3.17          # 抽 PDF 首2页正文 + 元数据 title
+# rapidfuzz>=3.0       # 标题模糊匹配
+#
+# CF/TLS 指纹增强(CF-soft 站命中率↑;缺则降级普通 requests)
+#   pip install -e ".[cf]"
+# curl_cffi>=0.6
+#
+# 读 .xlsx / .xlsm 输入表(.csv/.txt 走标准库,无需该依赖)
+#   pip install -e ".[xlsx]"
+# openpyxl
+#
+# 渲染型落地页取直链(无则回退纯 HTTP 抓取)
+#   pip install -e ".[render]"
+# playwright
+#
+# 路线B 浏览器内直下(JA3 型强 CF:RSC/ACS/Wiley/ScienceDirect;需有头 Chrome)
+#   pip install -e ".[browser]"
+#   注意: nodriver 为 AGPL-3.0(许可证传染),仅内部回收无碍、对外服务前过法务。
+# nodriver>=0.35
+#
+# 生产全量一键装齐(qc + cf + browser + xlsx):
+#   pip install -e ".[full]"
+#
+# 注: OCR 不是打包依赖(历史 OCR 桶为一次性探针处置,非运行期扩展)。

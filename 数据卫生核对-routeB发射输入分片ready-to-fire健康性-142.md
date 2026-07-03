@@ -3,6 +3,8 @@
 > 交付：**谷歌学术人机认证-142（worker）** → 总指挥 **144**｜2026-07-02｜工单 **task-17dfafb9**（[P2·只读] 发射前 ready-to-fire 输入分片健康性复检）。
 > 边界：**纯只读**核对 + **仅新建**本 1 份 md + 1 个可复跑核验脚本 `_routeb_shard_healthcheck_142.py`；**未改任何库 `.py`/产物/coverage/分片**，**未联网**。
 > 真值源：`out/coverage.json`（`generated_ts` **2026-07-02 18:25:56**，success 379 / miss 620 / total 999）+ `out/still_missing.txt`（620）。
+>
+> ⚠️ **净覆盖率口径统一（173 冻结）**：本文核对基于 **success 379 / miss 620**（@18:25:56 快照），现为**【历史口径】**——分片健康性核对方法与结论仍有效，仅数字已推进。**【历史快照】当前权威见 `out/coverage.json`：326 success / 673 miss / 999 = 32.63%**（generated_ts 2026-07-03 12:50:24, allow_override=10）。唯一权威见 **《基线口径冻结说明-388-173.md》**。
 > 口径对齐：读取口径 = `fulltext_fetcher/cli.py::_read_text_lines`（逐行 strip、跳空行与**整行** `#` 注释）——与真实 `-f` 发射逐字一致；DOI 规范化 = `tools/build_coverage.py::norm_doi`（小写、剥 `doi.org/`·`doi:` 前缀）；裸 DOI 形态 = `^10\.\d{4,9}/\S+$`。
 
 ---

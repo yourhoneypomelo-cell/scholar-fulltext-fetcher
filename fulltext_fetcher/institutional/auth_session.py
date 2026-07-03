@@ -92,11 +92,31 @@ class AuthSession:
         low = (url or "").lower()
         return not any(h in low for h in _SSO_DONE_HINTS)
 
-    def open_login_browser(self, login_url: str) -> None:
-        """可见浏览器人工 SSO — 待 -153 用 nodriver 实现."""
+    def open_login_browser(
+        self,
+        login_url: Optional[str] = None,
+        *,
+        browser: Any = None,
+        headless: bool = False,
+        **kwargs: Any,
+    ) -> Any:
+        """可见浏览器人工 SSO 登录.
+
+        - EZPROXY: 委托 ``ezproxy_login.run_ezproxy_login``(可注入 mock ``browser`` 供离线自检;
+          缺省用 nodriver 有头 Chrome),返回登录报告 dict,并把抓到的 Cookie 存 CookieStore
+          + 回填 ``credentials.institution_cookie``.
+        - 其余 provider(shibboleth/openathens/carsi/webvpn): 机制层待 -153,仍 NotImplementedError.
+
+        注:``ezproxy_login`` 在此**方法内延迟导入**(避免与本模块的模块级循环导入)。
+        """
+        if self.provider == AuthProvider.EZPROXY:
+            from .ezproxy_login import run_ezproxy_login, make_login_browser
+            br = browser if browser is not None else make_login_browser(
+                self.provider.value, headless=headless)
+            return run_ezproxy_login(self, br, login_url=login_url, **kwargs)
         raise NotImplementedError(
-            "open_login_browser: implement with nodriver visible Chrome (-153). "
-            f"login_url={login_url!r} provider={self.provider.value}"
+            "open_login_browser: 仅 EZproxy 分支已布线(-141/-149);"
+            f"provider={self.provider.value} 机制层待 -153. login_url={login_url!r}"
         )
 
 

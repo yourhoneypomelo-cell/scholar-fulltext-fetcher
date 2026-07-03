@@ -3,6 +3,8 @@
 > 交付：**谷歌学术人机认证-150**（worker · 信息检索-专家智库岗）｜2026-07-02｜工单来源：总指挥 148 **task-b291b688**（当前第一优先）。
 > 用途：**给回收波排序**——route-B 过盾算力有限（全局 concurrency=1、每条 ~15–45s 有头浏览器），**绝不能把算力浪费在注定 `no-pdf` 的订阅墙条目上**。本页把 A 集 74 条拆成【真 OA 子集＝值得 route-B 发射】vs【订阅墙＝route-B 必 no-pdf、不发射、留 route-A】，给发射顺序 + 预筛法 + 命令。
 > 边界：**新建本 1 份 md + 3 份发射清单 txt（数据产物），未改任何库 `.py`/产物**（预筛用一次性脚本跑完已删，逻辑＝调仓内 `publisher_oa.build_pdf_candidates`）。数据取自 `out/still_missing_shards/{rsc.txt,other.txt}`、`publisher_oa._rsc/_mdpi`、`经验记录 N.3/N.4/N.8`、`A5机构订阅现状与still_missing可救前缀梳理-150.md`（still_missing 628，2026-07-02）。
+>
+> ⚠️ **净覆盖率口径统一（✅ 定版 326）**：本文 still_missing 分母 **628**（@11:48 快照）为**【历史口径】**（MDPI7 已回写、后续多轮 merge 至定版 326）。**当前权威 = `out/coverage.json` `summary`：326 success / 673 miss / 999 = 32.63%**（generated_ts 2026-07-03 12:50:24，allow_override=10）。RSC67/MDPI7 发射优先级结论仍有效。唯一权威 + RSC 待并入项见 **《基线口径冻结说明-388-173.md》**。
 > **前作互证**：本页与 -140/-142 已交的 `检索成果-routeB回收波发射优先级-142.md` 同题；区别＝-142 是纯文档手工分桶（未跑、未产清单），**本轮把预筛机械跑实、产出可直接 `-f` 的发射清单 txt，且机械结果与 -142 手工分桶零差异**（4 RSC 金OA + 7 MDPI + 8 待 is_oa 复核）——互为交叉验证。
 > **实跑产物（本目录，已含 is_oa 联网复核终稿）**：`routeB_mdpi.txt`（**7**，先发）、`routeB_rsc_goldoa.txt`（**8**＝4 RSC Advances 离线金OA + 4 is_oa 复核命中，次发）、`routeB_rsc_subscription.txt`（**59**，不发/留 A5）。**route-B 发射波合计 = RSC 8 + MDPI 7 = 15。**
 > **is_oa 复核结果（2026-07-02 Unpaywall，8 条 [NEED_is_oa]）**：命中 4（`d0gc02302g` bronze、`d2gc02623f`/`d3ee02589f`/`d5fd00172b` hybrid，均托管 `pubs.rsc.org/en/content/articlepdf/...` → 并入发射）；closed 4（`d0gc00095g`/`d5gc03584h`/`d2nj03895a`/`d0cs00025f` → 留 A5）。

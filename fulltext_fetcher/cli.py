@@ -5,12 +5,37 @@
 from __future__ import annotations
 
 import argparse
+import io
 import os
 import sys
+import zipfile
 from typing import List
 
 from .config import DEFAULT_SOURCE_ORDER, Config
 from .pipeline import Pipeline
+
+
+def _decode_besteffort(data: bytes) -> str:
+    """把清单文件字节按最可能的编码解成文本,**绝不抛 UnicodeDecodeError**。
+    顺序:BOM(utf-8-sig / utf-16)→ utf-8 → gbk → latin-1(1:1 兜底,永不失败)→ utf-8 replace。
+    动因:中文 Windows 记事本/Excel「另存 ANSI」默认 GBK、「Unicode」默认 UTF-16;硬编码 utf-8
+    读它们会 UnicodeDecodeError 崩(裸 traceback)。BOM 优先避免 GBK 被无 BOM 的 utf-16 误解成乱码。"""
+    if data.startswith(b"\xef\xbb\xbf"):
+        try:
+            return data.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            pass
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        try:
+            return data.decode("utf-16")
+        except UnicodeDecodeError:
+            pass
+    for enc in ("utf-8", "gbk", "latin-1"):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
 
 
 def _read_input_file(path: str) -> List[str]:
@@ -18,23 +43,46 @@ def _read_input_file(path: str) -> List[str]:
       - .csv          → 识别 doi/title 列(无表头则取每行首个非空单元格)
       - .xlsx/.xlsm   → 同 csv 逻辑(需可选依赖 openpyxl)
       - 其它(.txt)   → 逐行,# 开头为注释
+
+    健壮性(-167 输入健壮性矩阵):编码由 `_decode_besteffort` 兜底(GBK/UTF-16/latin-1 不再崩);
+    文件不存在/损坏 .xlsx/权限/目录等读取失败 → 抛 **SystemExit(可读中文提示)** 作**明确终态**
+    (调用方 main/run 捕获后打印并 return 2,不再裸 traceback+exit 1)。
     """
     low = path.lower()
-    if low.endswith(".csv"):
-        return _read_csv(path)
-    if low.endswith((".xlsx", ".xlsm")):
-        return _read_xlsx(path)
-    return _read_text_lines(path)
+    try:
+        if low.endswith(".csv"):
+            return _read_csv(path)
+        if low.endswith((".xlsx", ".xlsm")):
+            return _read_xlsx(path)
+        return _read_text_lines(path)
+    except SystemExit:
+        raise  # 已是明确终态(如缺 openpyxl 的可读提示)→ 原样上抛
+    except FileNotFoundError:
+        raise SystemExit("错误:输入文件不存在:%s" % path)
+    except IsADirectoryError:
+        raise SystemExit("错误:输入路径是目录而非文件:%s" % path)
+    except PermissionError:
+        raise SystemExit("错误:无权限读取输入文件:%s" % path)
+    except zipfile.BadZipFile:
+        raise SystemExit("错误:文件不是有效的 .xlsx(损坏或非真 Excel 容器):%s;"
+                         "可用 Excel/WPS 另存为 .csv 再 -f data.csv。" % path)
+    except (OSError, UnicodeDecodeError) as e:  # 其它 IO / 极端解码失败 → 明确终态,不裸崩
+        raise SystemExit("错误:读取输入文件失败:%s(%s)" % (path, e))
 
 
 def _read_text_lines(path: str) -> List[str]:
+    text = _decode_besteffort(_read_file_bytes(path))
     out: List[str] = []
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith("#"):
-                out.append(line)
+    for line in text.splitlines():      # splitlines 统吃 \n / \r\n / \r,天然处理 CRLF
+        line = line.strip()
+        if line and not line.startswith("#"):
+            out.append(line)
     return out
+
+
+def _read_file_bytes(path: str) -> bytes:
+    with open(path, "rb") as f:
+        return f.read()
 
 
 def _extract_from_rows(rows: List[List[str]]) -> List[str]:
@@ -67,8 +115,9 @@ def _extract_from_rows(rows: List[List[str]]) -> List[str]:
 
 def _read_csv(path: str) -> List[str]:
     import csv
-    with open(path, newline="", encoding="utf-8-sig") as f:
-        rows = [[(c if c is not None else "") for c in row] for row in csv.reader(f)]
+    text = _decode_besteffort(_read_file_bytes(path))   # 先编码兜底(GBK/UTF-16 的 CSV 也能读)
+    rows = [[(c if c is not None else "") for c in row]
+            for row in csv.reader(text.splitlines())]   # 喂逐行,规避 StringIO 的 \r 换行歧义
     return _extract_from_rows(rows)
 
 
@@ -185,7 +234,11 @@ def main(argv: List[str] | None = None) -> int:
 
     inputs: List[str] = list(args.inputs)
     if args.input_file:
-        inputs.extend(_read_input_file(args.input_file))
+        try:
+            inputs.extend(_read_input_file(args.input_file))
+        except SystemExit as e:      # 读取层明确终态(不存在/损坏/缺 openpyxl):打印可读错误 + return 2,不裸 traceback
+            print(str(e), file=sys.stderr)
+            return 2
     if not inputs:
         print("错误:未提供任何输入。示例:\n"
               '  python -m fulltext_fetcher "10.1038/nature12373" --email you@uni.edu\n'
@@ -374,6 +427,34 @@ def _selftest() -> int:
             os.environ.pop("FULLTEXT_NAMING_TEMPLATE", None)
         else:
             os.environ["FULLTEXT_NAMING_TEMPLATE"] = _prev_nt
+
+    # ⑧ 输入健壮性(承 -167 矩阵):非 UTF-8 编码不崩(读出内容)、不存在/损坏 .xlsx 给明确终态(SystemExit)
+    with tempfile.TemporaryDirectory() as d8:
+        pg = os.path.join(d8, "gbk.txt")
+        with open(pg, "w", encoding="gbk") as f:
+            f.write("石墨烯综述\n10.1021/jacs.0c00000\n")
+        assert _read_input_file(pg) == ["石墨烯综述", "10.1021/jacs.0c00000"], _read_input_file(pg)
+        pu = os.path.join(d8, "u16.txt")
+        with open(pu, "w", encoding="utf-16") as f:
+            f.write("10.1038/nature12373\nAttention Is All You Need\n")
+        assert _read_input_file(pu) == ["10.1038/nature12373", "Attention Is All You Need"], _read_input_file(pu)
+        pgc = os.path.join(d8, "gbk.csv")
+        with open(pgc, "w", encoding="gbk", newline="") as f:
+            f.write("title,doi\n石墨烯,10.1021/x\n钙钛矿,10.1021/y\n")
+        assert _read_input_file(pgc) == ["10.1021/x", "10.1021/y"], _read_input_file(pgc)
+        try:                                   # 不存在 → 明确终态(SystemExit),非裸 FileNotFoundError
+            _read_input_file(os.path.join(d8, "nope_selftest.txt"))
+            raise AssertionError("not-found 应抛 SystemExit")
+        except SystemExit as e:
+            assert "不存在" in str(e), str(e)
+        pc = os.path.join(d8, "corrupt.xlsx")  # 损坏 .xlsx → 明确终态(SystemExit),非裸 BadZipFile
+        with open(pc, "wb") as f:
+            f.write(b"not a real xlsx zip container\n" * 3)
+        try:
+            _read_input_file(pc)
+            raise AssertionError("corrupt .xlsx 应抛 SystemExit")
+        except SystemExit as e:
+            assert (".xlsx" in str(e)) or ("Excel" in str(e)) or ("openpyxl" in str(e)), str(e)
 
     print("CLI_OK")
     return 0
