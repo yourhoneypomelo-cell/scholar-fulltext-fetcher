@@ -1260,7 +1260,9 @@ def _nodriver_capture_fn(headless: bool = False,
                 return None, ("blocked:challenge-page" if last_blocked else "no-pdf-captured")
             finally:
                 try:
-                    browser.stop()
+                    _stopped = browser.stop()          # nodriver: 同步返回; zendriver: 返回协程需 await
+                    if asyncio.iscoroutine(_stopped):
+                        await _stopped
                 except Exception:  # noqa: BLE001
                     pass
 
