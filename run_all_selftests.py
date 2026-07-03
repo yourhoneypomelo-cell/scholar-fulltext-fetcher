@@ -100,6 +100,7 @@ CHECKS = [
     # 以子进程 `python -m <mod>` 运行(与 ONLINE_CHECKS 里 tools.flaresolverr_nodriver 同款),绝不编辑被测脚本。
     ("run_all",            ["run_all"],                                                                   ["--selftest"], "RUN_ALL_OK"),
     ("build_coverage",     ["tools.build_coverage"],                                                      ["--selftest"], "COVERAGE_OK"),
+    ("consolidate_delivery", ["tools.consolidate_delivery"],                                              ["--selftest"], "CONSOLIDATE_OK"),
 ]
 
 # —— 可选「联网」自检(默认 SKIP;需真实浏览器 + 出网)——
