@@ -11,10 +11,12 @@ name = "fulltext_fetcher"
 version = "1.0.0"
 description = "输入 DOI/标题,多源回退全自动定位并下载全网可及的免费开放获取(OA)全文/PDF。"
 readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.8"
 authors = [{ name = "谷歌学术人机认证工作组" }]
 keywords = ["open-access", "fulltext", "pdf", "doi", "unpaywall", "openalex", "scholarly"]
 classifiers = [
+    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.8",
     "Operating System :: OS Independent",
