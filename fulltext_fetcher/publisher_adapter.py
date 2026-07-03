@@ -26,6 +26,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 _ACCEPT_PDF = "application/pdf"
 _TDM_APPS = ("text-mining", "similarity-checking")   # Crossref 里典型的 TDM 用途标记
@@ -48,6 +49,17 @@ _REGISTRY: Dict[str, tuple] = {
 
 _DOI_PREFIX_RE = re.compile(r"(10\.\d{4,9})/")
 _DOI_URL_RE = re.compile(r"(?i)^\s*(?:https?://(?:dx\.)?doi\.org/|doi:)\s*")
+
+
+def _wiley_doi_path(d: str) -> str:
+    m = _DOI_PREFIX_RE.match(d)
+    if not m:
+        return quote(d, safe="")
+    prefix = m.group(1)
+    suffix = d[len(prefix) + 1:]
+    if not suffix:
+        return d
+    return f"{prefix}/{quote(suffix, safe='')}"
 
 
 def _normalize_doi(doi: Any) -> str:
@@ -80,9 +92,10 @@ class PublisherAdapter:
         if not d:
             return []
         out: List[str] = []
+        doi_for_url = _wiley_doi_path(d) if self.key == "wiley" else d
         for t in self.templates:
             try:
-                out.append(t.format(doi=d))
+                out.append(t.format(doi=doi_for_url))
             except Exception:  # noqa: BLE001 - 模板异常不致命
                 continue
         return out
@@ -182,6 +195,11 @@ if __name__ == "__main__":  # 离线 selftest: python -m fulltext_fetcher.publis
     assert by_doi_prefix("10.1002/adma.1").pdf_candidates() == [
         "https://onlinelibrary.wiley.com/doi/pdfdirect/10.1002/adma.1",
         "https://onlinelibrary.wiley.com/doi/pdf/10.1002/adma.1"]
+    _legacy_wiley = "10.1002/1099-0739(200012)14:12<836::AID-AOC97>3.0.CO;2-C"
+    _legacy_enc = _wiley_doi_path(_legacy_wiley)
+    assert by_doi_prefix(_legacy_wiley).pdf_candidates() == [
+        f"https://onlinelibrary.wiley.com/doi/pdfdirect/{_legacy_enc}",
+        f"https://onlinelibrary.wiley.com/doi/pdf/{_legacy_enc}"]
     assert by_doi_prefix("10.1088/1/2").pdf_candidates() == [
         "https://iopscience.iop.org/article/10.1088/1/2/pdf"]
     # pdf_candidates 可传入覆盖 DOI

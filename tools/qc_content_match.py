@@ -297,18 +297,50 @@ def iter_records():
             continue
 
 
+# ── DOI 命中位置权重(149 实锤假阳:参考文献/引用区里的 DOI 被误当正文命中)────────────────
+# 149 开卷复核实锤:「DOI 在正文 → match」把【参考文献/引用区】里出现的 DOI 也算 in-text 命中 → 假阳
+# (他篇正文引到期望 DOI 也会命中,如 aic.690210612)。与 download.py::_qc_doi_hit_zone 同口径:以首个
+# 参考文献区标题为界,界前(或无标题时全文)命中 = body(强证据),仅界后命中 = references(降权、不算)。
+_REFS_HEADING_RE = re.compile(
+    r"(?i)(?:references\s+and\s+notes|notes\s+and\s+references|references\s+cited|"
+    r"literature\s+cited|\breferences\b|\bbibliography\b|参考文献|引用文献|参考资料)")
+
+
+def doi_hit_zone(text: Optional[str], doi: Optional[str]) -> Optional[str]:
+    """期望 DOI 在正文里的命中区:'body'(正文/摘要,强证据)/'references'(仅参考文献·引用区,降权)/
+    None(未命中)。以【首个】参考文献区标题(References/Bibliography/参考文献…)为界,界前(或无标题时
+    全文)命中 → body;仅界后命中 → references;两处皆无 → None。纯字符串/正则,绝不抛。
+    """
+    en = norm_for_doi(doi)
+    if not en:
+        return None
+    s = str(text or "")
+    if not s:
+        return None
+    m = _REFS_HEADING_RE.search(s)
+    if m is None:
+        return "body" if en in norm_for_doi(s) else None
+    if en in norm_for_doi(s[:m.start()]):
+        return "body"
+    if en in norm_for_doi(s[m.start():]):
+        return "references"
+    return None
+
+
 def classify(expected_title: Optional[str], doi: Optional[str], meta_title: Optional[str],
              text: Optional[str], match_hi: int = MATCH_HI, mismatch_lo: int = MISMATCH_LO):
     """纯函数单一真源:给定 期望标题 / DOI / PDF元数据标题 / PDF正文 → (verdict, score, reason)。
 
     不依赖 pypdf / 文件系统,供 download.py 等在"记 success 前"复用同一判定逻辑。
     判定顺序(与 judge 完全一致):
-      DOI 在正文 → match;标题分>=hi → match;抽不出正文 → scanned(绝不 mismatch);
+      DOI 在【正文/摘要区】→ match(149:参考文献/引用区命中不算,防他篇正文引到期望 DOI 的假阳);
+      标题分>=hi → match;抽不出正文 → scanned(绝不 mismatch);
       无期望标题 → uncertain;标题分<lo → mismatch;中间 → uncertain。
     verdict ∈ {match, mismatch, uncertain, scanned};score 为 title_score(无可比时 -1.0)。
     """
     exp = clean_title(expected_title)
-    doi_found = bool(doi) and norm_for_doi(doi) in norm_for_doi(text)
+    # 149:仅【正文/摘要区】命中期望 DOI 才算强正;仅参考文献/引用区命中(他篇正文引到期望 DOI)降权、不算
+    doi_found = doi_hit_zone(text, doi) == "body"
     meta_score = token_set_ratio(exp, clean_title(meta_title)) if (exp and meta_title) else -1.0
     body_score = token_set_ratio(exp, clean_title(text)) if (exp and text) else -1.0
     score = max(meta_score, body_score)

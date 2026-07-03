@@ -86,6 +86,8 @@ CHECKS = [
     ("publisher_oa",       ["fulltext_fetcher.sources.publisher_oa", "fulltext_fetcher.publisher_oa"],    [], "PUBLISHER_OA_OK"),
     ("publisher_direct",   ["fulltext_fetcher.sources.publisher_direct", "fulltext_fetcher.publisher_direct"], [], "PUBLISHER_DIRECT_OK"),
     ("institutional",      ["fulltext_fetcher.selftest_institutional"],                                   [], "INSTITUTIONAL_OK"),
+    ("a5_framework",       ["fulltext_fetcher.institutional.selftest_a5_framework"],                      [], "A5_FRAMEWORK_OK"),
+    ("assisted_auth",      ["fulltext_fetcher.institutional.assisted_auth"],                              [], "ASSISTED_AUTH_OK"),
     ("ezproxy",            ["fulltext_fetcher.ezproxy"],                                                  [], "EZPROXY_OK"),
     ("wayback",            ["fulltext_fetcher.sources.wayback", "fulltext_fetcher.wayback"],              [], "WAYBACK_OK"),
     ("preprints",          ["fulltext_fetcher.sources.preprints", "fulltext_fetcher.preprints"],          [], "PREPRINTS_OK"),

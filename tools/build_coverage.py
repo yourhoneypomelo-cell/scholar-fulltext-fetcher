@@ -45,6 +45,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from collections import Counter
@@ -299,11 +300,103 @@ def list_batch_dirs(out_root: str,
     return [rel for _mt, rel in items]
 
 
+# ── 回写开卷门(监管者169·任务3):qc_allow 计 success 前必开卷读落盘 PDF 验 expected-doi ──
+# 背景:下载期 metadata.jsonl 记的 match/expected-doi 可能与落盘 PDF 真身不符(147 逮到 1.5053761
+#      落盘实为 AIP 用户手册顶包)。故 qc_allow(免死金牌)命中项在计 success 前,必须对其落盘 PDF
+#      重新开卷核 expected-doi-present;仅当【文件可读 且 有正文 且 无期望DOI 且 有标题但不命中】才吊销。
+# no-false-kill:抽取失败/无标题可比/文件缺失/pypdf 缺失 → 一律保留(优雅降级)。
+_OPENBOOK_MIN_CHARS = 200      # 正文抽取字符下限:低于此视为抽取失败 → 无法判定(保留)
+_OPENBOOK_TITLE_MIN = 0.5      # 标题 token 命中率 ≥ 此值视为真论文(DOI 常因首页为图而未印)
+
+
+def _openbook_doi_in_text(doi: str, body_low: str) -> bool:
+    d = (doi or "").lower().strip()
+    if not d:
+        return False
+    if d in body_low:
+        return True
+    tail = d.split("/", 1)[1] if "/" in d else d
+    if tail and tail in body_low:
+        return True
+    tail_alnum = re.sub(r"[^a-z0-9]", "", tail)
+    return len(tail_alnum) >= 6 and tail_alnum in re.sub(r"[^a-z0-9]", "", body_low)
+
+
+def _openbook_title_overlap(title: Optional[str], body_low: str) -> Optional[float]:
+    if not title:
+        return None
+    toks = set(re.findall(r"[a-z]{4,}", title.lower()))
+    if not toks:
+        return None
+    return sum(1 for t in toks if t in body_low) / len(toks)
+
+
+def _allow_openbook_verdict(body_low: str, doi: str, title: Optional[str]) -> Optional[bool]:
+    """开卷判定:None=无法判定(保留);True=真(保留);False=证据确凿错文(吊销免死金牌)。
+
+    范围:本门只判「是否抓错了完全不同的文献(wrong-paper)」——凭 expected-doi + 标题命中。
+    不承担 SI-only 顶包(补充材料冒充正文)的识别:SI 常重复正文标题、又常零星含
+    abstract/introduction 字样,任何纯启发式要么漏判要么误杀真论文,违背 no-false-kill。
+    SI-only 判定交内容 QC(151/154 的 body_sig/FigureS 检测器)+ 黑名单/白名单清单治理。"""
+    if not body_low or len(body_low) < _OPENBOOK_MIN_CHARS:
+        return None                                    # 抽取失败/空 → 保留
+    if _openbook_doi_in_text(doi, body_low):
+        return True                                    # 正文含期望 DOI → 真(黄金判据)
+    ov = _openbook_title_overlap(title, body_low)
+    if ov is None:
+        return None                                    # 无标题可比 → 保留(no-false-kill)
+    if ov >= _OPENBOOK_TITLE_MIN:
+        return True                                    # 标题高命中 → 真
+    return False                                       # 有正文、无期望DOI、标题不命中 → 错文
+
+
+def _openbook_pdf_body(pdf_path: str, out_root: str) -> Optional[str]:
+    """读落盘 PDF 正文(前12页+末2页,小写);文件缺失/pypdf 缺失/读失败 → None(无法判定)。"""
+    cands = [pdf_path, pdf_path.replace("/", os.sep)]
+    parent = os.path.dirname(os.path.abspath(out_root.rstrip("/\\"))) or "."
+    cands.append(os.path.join(parent, pdf_path.replace("/", os.sep)))
+    path = next((p for p in cands if p and os.path.isfile(p)), None)
+    if not path:
+        return None
+    try:
+        import pypdf  # 懒加载:环境无 pypdf 则优雅降级(不阻塞 coverage 构建)
+    except Exception:
+        return None
+    try:
+        rdr = pypdf.PdfReader(path)
+        n = len(rdr.pages)
+        idx = list(range(min(n, 12)))
+        if n > 12:
+            idx += [n - 2, n - 1]
+        return "".join((rdr.pages[i].extract_text() or "") for i in idx).lower()
+    except Exception:
+        return None
+
+
+def verify_qc_allow_openbook(qc_allow: Set[str], records: List[Dict[str, Any]],
+                             out_root: str) -> Set[str]:
+    """对 qc_allow 命中的落盘 success 逐条开卷,返回【证据确凿为错文】应吊销的 DOI 集(no-false-kill)。"""
+    revoked: Set[str] = set()
+    if not qc_allow:
+        return revoked
+    for r in records:
+        d = r.get("doi")
+        if d not in qc_allow or r.get("status") != "success" or not r.get("pdf_path"):
+            continue
+        body = _openbook_pdf_body(r["pdf_path"], out_root)
+        if body is None:
+            continue                                   # 无法判定/文件缺失 → 保留
+        if _allow_openbook_verdict(body, d, r.get("title")) is False:
+            revoked.add(d)
+    return revoked
+
+
 def build(out_root: str,
           qc_hard: Optional[Set[str]] = None,
           qc_soft: Optional[Set[str]] = None,
           *,
           qc_allow: Optional[Set[str]] = None,
+          verify_allow: bool = True,
           include_nested: bool = False,
           exclude_substrings: Tuple[str, ...] = _NESTED_EXCLUDE_SUBSTR,
           extra_dirs: Optional[Iterable[str]] = None) -> Dict[str, Any]:
@@ -373,6 +466,10 @@ def build(out_root: str,
 
             if real:
                 pb = int(r.get("pdf_bytes") or 0)
+                # 收集本 DOI 的全部落盘候选(供 records 排序前的 dedup 开卷重选;总指挥-173 根因修复)
+                e.setdefault("_cands", []).append({
+                    "pb": pb, "source": r.get("source_used"),
+                    "pdf_path": (r.get("pdf_path") or "").replace("\\", "/"), "batch": name})
                 if e["status"] != "success" or pb > int(e["pdf_bytes"] or 0):
                     e["status"] = "success"
                     e["source"] = r.get("source_used")
@@ -400,19 +497,63 @@ def build(out_root: str,
             "pdf_files_on_disk": len(pdfs),
         })
 
+    # ── dedup 根因修复(总指挥-173):同一 DOI 多落盘版,优先取【开卷验 expected-doi 通过者】而非最大 bytes ──
+    # 根因:websearch 抓错文常比真全文更大,旧 max-bytes 偏好会让 pointer 指向大错文(catal15111028/
+    # en11092276/apcatb 皆此)。仅在 >=2 落盘候选时重选;有通过者→取通过者中最大 bytes;无通过者(pypdf
+    # 抽取差/DOI 印在图上等)→ 保持原 max-bytes 选择,绝不因此判 miss(no-false-kill,判错是黑名单/allow 门职责)。
+    if verify_allow:
+        for e in cov.values():
+            cands = e.get("_cands") or []
+            if e["status"] != "success" or len(cands) <= 1:
+                continue
+            passed = []
+            for c in cands:
+                body = _openbook_pdf_body(c["pdf_path"], out_root)
+                if body is not None and _openbook_doi_in_text(e["doi"], body):
+                    passed.append(c)
+            if passed:
+                pick = max(passed, key=lambda c: c["pb"])
+                if pick["pdf_path"] != e["pdf_path"]:
+                    e["dedup_reselected"] = {
+                        "from": e["pdf_path"], "to": pick["pdf_path"],
+                        "n_cands": len(cands), "n_expected_doi_pass": len(passed),
+                        "reason": "prefer-expected-doi-present-over-max-bytes"}
+                    e["source"], e["pdf_path"], e["pdf_bytes"], e["batch"] = (
+                        pick["source"], pick["pdf_path"], pick["pb"], pick["batch"])
+    for e in cov.values():
+        e.pop("_cands", None)                 # 清理内部候选缓存,不写入 coverage.json
+
     records = sorted(cov.values(), key=lambda r: r["doi"])
+
+    # 回写开卷门:qc_allow 命中项计 success 前,开卷读落盘 PDF 验 expected-doi;证据确凿错文的吊销免死金牌。
+    allow_revoked: Set[str] = (
+        verify_qc_allow_openbook(qc_allow, records, out_root) if (verify_allow and qc_allow) else set()
+    )
 
     # ── QC 剔除:命中审计黑名单的“成功”其实是抓错论文的假成功 → 改判 miss、计入 still_missing ──
     # 白名单已在函数入口从 qc_hard/qc_soft 扣除,故内容QC 核实为真正文者天然不会进入下面的剔除分支。
     success_before_qc = sum(1 for r in records if r["status"] == "success")
     rej_hard = rej_soft = 0
     n_allow_override = 0
+    n_allow_revoked = 0
     for r in records:
         if r["status"] != "success":
             continue
         d = r["doi"]
-        if d in qc_allow:                         # 白名单命中且确为落盘真成功:标记留证、免剔除
-            r["qc"] = "allow_override"
+        if d in qc_allow:                         # 白名单命中
+            if d in allow_revoked:                 # 开卷门:落盘 PDF 证据确凿为错文 → 吊销免死金牌、改判 miss
+                r["qc"] = "allow_revoked_openbook"
+                r["qc_rejected_source"] = r["source"]
+                r["qc_rejected_pdf_path"] = r["pdf_path"]
+                r["status"] = "miss"
+                r["source"] = None
+                r["pdf_path"] = None
+                r["pdf_bytes"] = 0
+                r["error"] = "allow_revoked_openbook:wrong-paper(no-expected-doi,no-title-match)"
+                r["batch"] = None
+                n_allow_revoked += 1
+                continue
+            r["qc"] = "allow_override"             # 确为落盘真成功(开卷验过/无法判定):标记留证、免剔除
             n_allow_override += 1
             continue
         if d in qc_hard:
@@ -465,12 +606,14 @@ def build(out_root: str,
             "rejected_soft": rej_soft,
             "rejected_total": rej_hard + rej_soft,
             "allow_override": n_allow_override,
+            "allow_revoked_openbook": n_allow_revoked,
             "success_after_qc": len(success),
             "success_rate_after_qc": round(len(success) / total, 4) if total else 0.0,
             "note": (
                 f"消费审计 QC 黑名单:原始去重成功 {success_before_qc} 剔除抓错论文 "
                 f"{rej_hard + rej_soft}(硬黑 {rej_hard} + 软黑 {rej_soft})→ 净成功 {len(success)}。"
-                f"白名单免剔 {n_allow_override}(内容QC 核实真正文、纠黑名单假阳)。"
+                f"白名单免剔 {n_allow_override}(内容QC 核实真正文、纠黑名单假阳)"
+                f"{('、开卷门吊销 %d(落盘实为错文)' % n_allow_revoked) if n_allow_revoked else ''}。"
                 "被剔除者改判 miss 并进 still_missing(留 qc_rejected_source/pdf 供复核)。"
                 if (qc_hard or qc_soft or qc_allow) else "未启用 QC 黑名单(--no-qc 或文件缺失):success 为原始去重口径,可能含抓错论文假成功。"
             ),
@@ -533,6 +676,7 @@ def run_coverage(out_root: str = OUT_DIR,
                  qc_uncertain_path: Optional[str] = None,
                  qc_extra_reject_paths: Optional[Iterable[str]] = None,
                  qc_allow_paths: Optional[Iterable[str]] = None,
+                 verify_allow: bool = True,
                  include_nested: bool = False,
                  exclude_substrings: Tuple[str, ...] = _NESTED_EXCLUDE_SUBSTR,
                  extra_dirs: Optional[Iterable[str]] = None,
@@ -576,6 +720,7 @@ def run_coverage(out_root: str = OUT_DIR,
         qc_allow = read_doi_lists(qc_allow_paths)           # 白名单(纠假阳),build 内优先级最高
 
     result = build(out_root, qc_hard=qc_hard, qc_soft=qc_soft, qc_allow=qc_allow,
+                   verify_allow=verify_allow,
                    include_nested=include_nested, exclude_substrings=exclude_substrings,
                    extra_dirs=extra_dirs)
     _sd = result["scanned_dirs"]
@@ -595,6 +740,7 @@ def run_coverage(out_root: str = OUT_DIR,
         "extra_reject": list(qc_extra_reject_paths or []),
         "allow": list(qc_allow_paths or []),
         "allow_dois": sorted(qc_allow),
+        "verify_allow_openbook": bool(verify_allow),
     }
     if write:
         cj = coverage_json or os.path.join(out_root, "coverage.json")
@@ -666,6 +812,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                          "out/rerun_acs_144_deduct_dois_145.txt")
     ap.add_argument("--qc-allow", default=None,
                     help="逗号分隔的白名单 DOI 清单文件(免剔、纠黑名单假阳;内容QC 已核实真正文者)")
+    ap.add_argument("--no-verify-allow", action="store_true",
+                    help="关闭『回写开卷门』(默认开):默认对每个 qc_allow 命中项开卷读落盘 PDF 验 "
+                         "expected-doi,证据确凿为错文者吊销免死金牌(no-false-kill)。加此开关跳过校验。")
     ap.add_argument("--no-write", action="store_true", help="只打印汇总,不落盘")
     ap.add_argument("--print-json", action="store_true",
                     help="stdout 输出 summary 的 JSON(供 run_all/父程序按 utf-8 解析接入)")
@@ -689,6 +838,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         qc_uncertain_path=args.qc_uncertain,
         qc_extra_reject_paths=extra_reject or None,
         qc_allow_paths=allow_paths or None,
+        verify_allow=not args.no_verify_allow,
         include_nested=args.nested,
         extra_dirs=extra_dirs or None,
         write=not args.no_write,
@@ -865,6 +1015,48 @@ def _selftest() -> int:
         assert still_missing_dois(resq) == [
             "10.1000/d1", "10.1000/d3", "10.1000/d4", "10.1000/d5"], still_missing_dois(resq)
 
+        # ── 回写开卷门(监管者169·任务3):qc_allow 计 success 前开卷验 expected-doi ──
+        # (1) 纯判定逻辑 _allow_openbook_verdict(字符串直测,不依赖真 PDF):
+        assert _allow_openbook_verdict(
+            "intro ... https://doi.org/10.1000/d3 ... methods and results section " * 4,
+            "10.1000/d3", "Any Title Here Words") is True, "正文含期望DOI应判真"
+        assert _allow_openbook_verdict(
+            "catalytic co2 reduction over copper zinc oxide catalysts kinetics mechanism " * 4,
+            "10.1000/zz", "Catalytic CO2 Reduction over Copper Zinc Oxide Catalysts") is True, "标题高命中应判真"
+        assert _allow_openbook_verdict(
+            "convex optimization stephen boyd stanford electrical engineering textbook chapter " * 5,
+            "10.1000/zz", "Catalytic CO2 Reduction over Copper") is False, "有正文+无期望DOI+标题不命中应判错文"
+        assert _allow_openbook_verdict("", "10.1000/zz", "Any Title") is None, "空正文应无法判定(保留)"
+        assert _allow_openbook_verdict("x" * 50, "10.1000/zz", "Any Title") is None, "正文过短应无法判定(保留)"
+        assert _allow_openbook_verdict(
+            "long body text without the identifier or matching title tokens present here " * 8,
+            "10.1000/zz", None) is None, "无标题可比应无法判定(保留·no-false-kill)"
+
+        # (2) 吊销路径 verify_qc_allow_openbook(monkeypatch 开卷读取喂『错文正文』):
+        #     w1 标题不命中错文 → 吊销;w2 无标题 → 无法判定保留(no-false-kill)。
+        _orig_body_fn = globals()["_openbook_pdf_body"]
+        globals()["_openbook_pdf_body"] = lambda _p, _o: ("convex optimization boyd stanford textbook chapter three " * 20)
+        try:
+            fake_records = [
+                {"doi": "10.1000/w1", "status": "success", "pdf_path": "out/x/pdfs/w1.pdf",
+                 "title": "Catalytic CO2 Hydrogenation over Copper Catalysts"},
+                {"doi": "10.1000/w2", "status": "success", "pdf_path": "out/x/pdfs/w2.pdf",
+                 "title": None},
+            ]
+            rev = verify_qc_allow_openbook({"10.1000/w1", "10.1000/w2"}, fake_records, root)
+        finally:
+            globals()["_openbook_pdf_body"] = _orig_body_fn
+        assert rev == {"10.1000/w1"}, rev
+
+        # (3) build() 集成:白名单纠软黑假阳,落盘为空文件(非有效PDF)→ 开卷无法判定 → 保留(no-false-kill);
+        #     且开卷门开/关在此数据上净成功一致(缺证据绝不误吊销)。
+        res_on = build(root, qc_hard=set(), qc_soft={"10.1000/d1"}, qc_allow={"10.1000/d1"}, verify_allow=True)
+        ba = {r["doi"]: r for r in res_on["records"]}
+        assert ba["10.1000/d1"]["status"] == "success" and ba["10.1000/d1"]["qc"] == "allow_override", ba["10.1000/d1"]
+        assert res_on["summary"]["qc"]["allow_revoked_openbook"] == 0, res_on["summary"]["qc"]
+        res_off = build(root, qc_hard=set(), qc_soft={"10.1000/d1"}, qc_allow={"10.1000/d1"}, verify_allow=False)
+        assert res_off["summary"]["success"] == res_on["summary"]["success"], "开卷门缺证据时不得改变净成功"
+
         # read_qc_dois:能从带表头 CSV 读出规范化 doi(大小写/前缀归一)
         qc_csv = os.path.join(tmp, "qc.csv")
         with open(qc_csv, "w", encoding="utf-8") as f:
@@ -1012,6 +1204,42 @@ def _selftest() -> int:
         assert bca["10.1000/d2"]["status"] == "miss", bca["10.1000/d2"]        # extra-reject 拉黑
         assert rc_a["summary"]["qc"]["allow_override"] == 1, rc_a["summary"]["qc"]
         assert rc_a["_qc_paths"]["allow_dois"] == ["10.1000/d1"], rc_a["_qc_paths"]
+
+        # ── dedup 根因修复(总指挥-173):同一 DOI 多落盘版优先取 expected-doi 通过者,非最大 bytes ──
+        dd = os.path.join(tmp, "dedup_root")
+        wb = os.path.join(dd, "wrongbig")      # 大 bytes 但错文(无期望 DOI)
+        rs = os.path.join(dd, "rightsmall")    # 小 bytes 但真(含期望 DOI)
+        os.makedirs(os.path.join(wb, "pdfs"))
+        os.makedirs(os.path.join(rs, "pdfs"))
+        with open(os.path.join(wb, "metadata.jsonl"), "w", encoding="utf-8") as f:
+            f.write(rec("10.1000/dd", True, "websearch", "out/wrongbig/pdfs/dd.pdf", 9000))
+        with open(os.path.join(rs, "metadata.jsonl"), "w", encoding="utf-8") as f:
+            f.write(rec("10.1000/dd", True, "unpaywall", "out/rightsmall/pdfs/dd.pdf", 100))
+        open(os.path.join(wb, "pdfs", "dd.pdf"), "w").close()
+        open(os.path.join(rs, "pdfs", "dd.pdf"), "w").close()
+        _orig_body = globals()["_openbook_pdf_body"]
+        globals()["_openbook_pdf_body"] = lambda p, o: (
+            "real full text body mentioning 10.1000/dd in the article " * 6
+            if "rightsmall" in p.replace("\\", "/")
+            else "unrelated convex optimization boyd textbook no target doi here " * 6)
+        try:
+            r_dd = build(dd, verify_allow=True)
+        finally:
+            globals()["_openbook_pdf_body"] = _orig_body
+        b_dd = {r["doi"]: r for r in r_dd["records"]}["10.1000/dd"]
+        assert b_dd["status"] == "success", b_dd
+        assert "rightsmall" in b_dd["pdf_path"], ("dedup 须选 expected-doi 通过的小版而非最大bytes错文", b_dd)
+        assert b_dd["source"] == "unpaywall" and b_dd["pdf_bytes"] == 100, b_dd
+        assert b_dd.get("dedup_reselected"), "须留 dedup_reselected 证据"
+        # no-false-kill:两版都无期望 DOI(都不通过)→ 回退最大 bytes、仍 success(不误杀、不重选)
+        globals()["_openbook_pdf_body"] = lambda p, o: "generic text without any target identifier at all " * 8
+        try:
+            r_dd2 = build(dd, verify_allow=True)
+        finally:
+            globals()["_openbook_pdf_body"] = _orig_body
+        b_dd2 = {r["doi"]: r for r in r_dd2["records"]}["10.1000/dd"]
+        assert b_dd2["status"] == "success" and "wrongbig" in b_dd2["pdf_path"], ("no-false-kill:无通过者应回退最大bytes", b_dd2)
+        assert not b_dd2.get("dedup_reselected"), "无通过者不应重选"
 
         print("COVERAGE_OK")
         return 0

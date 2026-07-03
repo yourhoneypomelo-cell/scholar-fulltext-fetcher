@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 import threading
 import time
@@ -71,6 +72,34 @@ def _cookie_for_host(cookie_domain: str, host: str) -> bool:
     if not d or not host:
         return False
     return host == d or host.endswith("." + d) or d.endswith("." + host)
+
+
+def _env_true(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _resolve_headless(default: bool) -> bool:
+    """CF 解题器无头开关:环境变量 FTF_HEADLESS 优先于调用方默认值。
+    FTF_HEADLESS=1/true/yes/on → 强制无头;=0/false/no/off → 强制有头;未设 → 用 default(有头)。
+
+    **本解题器默认【有头】而非无头**:真机实测 pubs.aip.org 等 managed-challenge 站【无头过 CF
+    通过率极低】(本机 headless 81.5s 都拿不到 cf_clearance,有头 ~8s 即过)——解题器的本职就是过 CF,
+    无头会直接废掉主功能。为"不弹窗打扰办公"又不牺牲 CF 通过率:默认【有头 + 窗口移出屏幕】(见
+    _offscreen_args),而非无头。真要无头(如服务器/xvfb)可显式 FTF_HEADLESS=1。"""
+    v = os.environ.get("FTF_HEADLESS", "").strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    return default
+
+
+def _offscreen_args(headless: bool) -> List[str]:
+    """有头模式下【默认】把窗口移出可视区域:不弹窗打扰办公,又保留有头的 CF 通过率(优于无头)。
+    要显示窗口排障/调 CF 时设 FTF_BROWSER_SHOW=1/true/yes/on。无头本就无窗口,返回空。"""
+    if headless or _env_true("FTF_BROWSER_SHOW"):
+        return []
+    return ["--window-position=-2400,-2400"]
 
 
 class Solver:
@@ -115,9 +144,11 @@ class Solver:
 
     async def _boot(self) -> None:
         self._lock = asyncio.Lock()
-        self._browser = await nd.start(headless=self.headless, browser_args=[
+        _hl = _resolve_headless(self.headless)
+        self._browser = await nd.start(headless=_hl, browser_args=[
             "--lang=en-US", "--disable-blink-features=AutomationControlled",
-            "--window-size=1400,1000", "--no-first-run", "--no-default-browser-check"])
+            "--window-size=1400,1000", "--no-first-run", "--no-default-browser-check",
+            *_offscreen_args(_hl)])
         self._tab = await self._browser.get("about:blank")
 
     def solve(self, url: str, max_ms: int) -> Dict[str, Any]:

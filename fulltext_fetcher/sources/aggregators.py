@@ -4,10 +4,11 @@
 """
 from __future__ import annotations
 
-from typing import List
+import concurrent.futures
+from typing import Any, Callable, List, Optional, Tuple
 
 from ..models import Paper, PdfCandidate
-from .base import BaseSource, SourceContext, register
+from .base import REGISTRY, BaseSource, SourceContext, register
 
 
 @register
@@ -47,18 +48,25 @@ class OpenAlex(BaseSource):
         if not data:
             return []
         out: List[PdfCandidate] = []
+        # 位置级 canonical 直链:best_oa_location / primary_location 的 pdf_url(权威,保留高分)。
         for locname, conf in (("best_oa_location", 93), ("primary_location", 70)):
             loc = data.get(locname) or {}
             if isinstance(loc, dict) and loc.get("pdf_url"):
                 out.append(PdfCandidate(loc["pdf_url"], self.name, "pdf",
                                         loc.get("version"), loc.get("license"), conf))
+        # open_access.oa_url:免费三件套的 OpenAlex canonical OA 指针(-145 配方核心字段之一)。
+        # 口径纠偏(147 五-补):此前当 landing/38 低分,实为 OpenAlex「最接近免费的全文 URL」,
+        # 提升为 pdf 直链 72(略高于 primary 的原始 pdf_url,低于 best_oa 93);
+        # 下载层对非 PDF 情形有 %PDF 校验 + landing 回收兜底,提升不会引入假成功。
+        oa = data.get("open_access") or {}
+        if oa.get("oa_url"):
+            out.append(PdfCandidate(oa["oa_url"], self.name, "pdf", None, None, 72))
+        # locations[].pdf_url:泛位置数组,含镜像/重复/偶发非 PDF(-145 判为 lossy)。
+        # 纠偏:从 74 降到 40(保留召回但排在 canonical 之后),不再与真 OA 直链抢先。
         for loc in (data.get("locations") or []):
             if isinstance(loc, dict) and loc.get("pdf_url"):
                 out.append(PdfCandidate(loc["pdf_url"], self.name, "pdf",
-                                        loc.get("version"), loc.get("license"), 74))
-        oa = data.get("open_access") or {}
-        if oa.get("oa_url"):
-            out.append(PdfCandidate(oa["oa_url"], self.name, "landing", None, None, 38))
+                                        loc.get("version"), loc.get("license"), 40))
         return out
 
 
@@ -287,6 +295,100 @@ def _collect_urls(node, acc: List[str], depth: int = 0) -> None:
             _collect_urls(item, acc, depth + 1)
 
 
+# ── 147 五-补:免费三件套并发 OA 发现 + %PDF 取首个(承接《总评估-147》五-补 / -145 §6.5)──
+# 定位:「谷歌学术可达 PDF 绝大多数是 OA」——DOI 命中即**并发**查免费三件套(Unpaywall
+# url_for_pdf / OpenAlex open_access.oa_url / S2 openAccessPdf.url)拿 canonical 直链,
+# 取首个 %PDF 有效者,比串行逐源更快。本层只**发现候选 + 提供纯逻辑 helper**,真正落盘/网络
+# 取字节仍由 download 层(其 %PDF 校验/landing 回收/route-B)负责——本函数的 fetch 由调用方注入。
+_PDF_MAGIC = b"%PDF"
+
+# 免费三件套的源名(须与本模块 @register 的 name 一致):按 -145 配方的 canonical 字段。
+_TRIO_SOURCES: Tuple[str, ...] = ("unpaywall", "openalex", "semantic_scholar")
+
+
+def looks_like_pdf_bytes(head: Any) -> bool:
+    """%PDF 魔数校验(与 download.looks_like_pdf 同口径:前 1024 字节含 b'%PDF')。
+
+    source 层自含一份,便于离线 selftest 与被上层复用;容忍 bytes / str / None。
+    """
+    if not head:
+        return False
+    if isinstance(head, str):
+        head = head.encode("latin-1", "ignore")
+    try:
+        return _PDF_MAGIC in bytes(head)[:1024]
+    except Exception:  # noqa: BLE001 - 畸形输入一律判非 PDF,绝不抛
+        return False
+
+
+def _safe_find(src: BaseSource, paper: Paper, ctx: SourceContext) -> List[PdfCandidate]:
+    """调单源 find_candidates 并吞掉其自身异常(单源失败绝不拖垮并发批)。"""
+    try:
+        return src.find_candidates(paper, ctx) or []
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _dedup_rank(cands: List[PdfCandidate]) -> List[PdfCandidate]:
+    """去重(按 url 保留最高 confidence)+ 直链优先 + confidence 降序(稳定、可测)。"""
+    best: dict = {}
+    for c in cands:
+        prev = best.get(c.url)
+        if prev is None or c.confidence > prev.confidence:
+            best[c.url] = c
+    uniq = list(best.values())
+    uniq.sort(key=lambda c: (0 if c.is_direct() else 1, -int(c.confidence or 0), c.source, c.url))
+    return uniq
+
+
+def fast_oa_trio(paper: Paper, ctx: SourceContext, max_workers: int = 3) -> List[PdfCandidate]:
+    """并发查免费三件套(Unpaywall / OpenAlex / Semantic Scholar),合并为去重、按分降序的候选。
+
+    「最快」:三源同时发起(而非串行),单源异常/超时不影响其它源(交由 http_client 退避熔断)。
+    仅做**候选发现**,不取字节;结果交给 first_valid_pdf(或既有 download 编排)逐个验 %PDF。
+    """
+    srcs = [REGISTRY[n]() for n in _TRIO_SOURCES if n in REGISTRY]
+    if not srcs:
+        return []
+    merged: List[PdfCandidate] = []
+    workers = max(1, min(max_workers, len(srcs)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = [ex.submit(_safe_find, s, paper, ctx) for s in srcs]
+        for fut in concurrent.futures.as_completed(futs):
+            merged.extend(fut.result())
+    return _dedup_rank(merged)
+
+
+def _log_attempt(log: Any, c: PdfCandidate, reason: str) -> None:
+    """日志驱动:把每个候选的取回结果打成一行可读日志(source/conf/url/原因),失败不外抛。"""
+    if log is None:
+        return
+    try:
+        log.info("fast_oa: source=%s conf=%s url=%s -> %s", c.source, c.confidence, c.url, reason)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def first_valid_pdf(candidates: List[PdfCandidate], fetch: Callable[[str], Any],
+                    log: Any = None) -> Tuple[Optional[PdfCandidate], Optional[bytes]]:
+    """按序对候选调用注入的 ``fetch(url) -> bytes|None``,返回首个 %PDF 有效的 (candidate, data)。
+
+    全不中返回 (None, None)。每次尝试记一行可读日志(便于"读日志判断每篇为何成/败")。
+    ``fetch`` 注入 → 纯逻辑、可完全离线单测;真实网络取字节由调用方(download 层)提供。
+    """
+    for c in candidates:
+        try:
+            data = fetch(c.url)
+        except Exception as e:  # noqa: BLE001 - 单个 URL 取回异常不得中断整条 fallback
+            _log_attempt(log, c, "skip:fetch-error(%s)" % e)
+            continue
+        if data and looks_like_pdf_bytes(data):
+            _log_attempt(log, c, "ok:%%PDF(%d bytes)" % len(data))
+            return c, (data if isinstance(data, bytes) else bytes(data))
+        _log_attempt(log, c, "skip:not-pdf" if data else "skip:no-data")
+    return None, None
+
+
 if __name__ == "__main__":  # 纯函数 selftest(不联网): python -m fulltext_fetcher.sources.aggregators
     f = _score_crossref_link
     # 普通 application/pdf(非 TDM、非订阅域):基础 40
@@ -414,5 +516,100 @@ if __name__ == "__main__":  # 纯函数 selftest(不联网): python -m fulltext_
         {"url": {"$": "https://repo.z.org/ok.pdf"}}])}}}   # 单记录 dict(不带数组)+ 大写 DOI
     assert _openaire_record_urls(d6, _WANT) == ["https://repo.z.org/ok.pdf"]
     assert _openaire_record_urls(d6, "") == [] and _openaire_record_urls(d6, None) == []
+
+    # ══ 147 五-补:免费三件套并发 + oa_url 口径纠偏 + %PDF 取首个 ══════════════════
+    # ① looks_like_pdf_bytes:%PDF 魔数(bytes/str/None、前置空白容忍、超 1024 不误判)
+    assert looks_like_pdf_bytes(b"%PDF-1.7\nfoo") is True
+    assert looks_like_pdf_bytes("%PDF-1.4") is True
+    assert looks_like_pdf_bytes(b"<html>login</html>") is False
+    assert looks_like_pdf_bytes(b"") is False and looks_like_pdf_bytes(None) is False
+    assert looks_like_pdf_bytes(b"   %PDF-1.5") is True          # 前置空白仍在前 1024 内
+    assert looks_like_pdf_bytes(b"x" * 2000 + b"%PDF") is False  # 魔数在 1024 之外→不算
+
+    class _OAClient:
+        def __init__(self, data): self._data = data
+        def get_json(self, url, **kw): return self._data
+
+    class _OACfg:
+        email = "t@x.org"; openalex_key = None; s2_key = None
+
+    class _OAlexCtx:
+        def __init__(self, data):
+            self.client = _OAClient(data); self.cfg = _OACfg(); self.log = None; self.events = None
+
+    # ② OpenAlex oa_url 口径纠偏:oa_url→pdf/72(此前 landing/38);locations[].pdf_url→40
+    #    (此前 74,-145 判 lossy);best_oa(93)/primary(70) 保持不变
+    _oa_data = {
+        "best_oa_location": {"pdf_url": "https://oa.org/best.pdf", "version": "publishedVersion"},
+        "primary_location": {"pdf_url": "https://oa.org/primary.pdf"},
+        "locations": [{"pdf_url": "https://mirror.org/lossy.pdf"}],
+        "open_access": {"oa_url": "https://oa.org/canonical.pdf"},
+    }
+    _oc = {c.url: c for c in OpenAlex().find_candidates(Paper(doi="10.1/x"), _OAlexCtx(_oa_data))}
+    assert _oc["https://oa.org/best.pdf"].confidence == 93, _oc
+    assert _oc["https://oa.org/primary.pdf"].confidence == 70, _oc
+    assert _oc["https://oa.org/canonical.pdf"].kind == "pdf" and \
+        _oc["https://oa.org/canonical.pdf"].confidence == 72, "oa_url 应纠偏为 pdf/72"
+    assert _oc["https://mirror.org/lossy.pdf"].confidence == 40, "lossy locations[].pdf_url 应降到 40"
+    # oa_url(72) 必须排在 lossy locations(40) 之前(纠偏后的选择序)
+    _rk = [c.url for c in _dedup_rank(OpenAlex().find_candidates(Paper(doi="10.1/x"), _OAlexCtx(_oa_data)))]
+    assert _rk.index("https://oa.org/canonical.pdf") < _rk.index("https://mirror.org/lossy.pdf"), _rk
+
+    # ③ fast_oa_trio:并发查 Unpaywall+OpenAlex+S2,合并去重、按分降序;单源异常不拖垮
+    _trio_table = {
+        "unpaywall.org": {"best_oa_location": {"url_for_pdf": "https://up.org/u.pdf", "version": "v"}},
+        "openalex.org": _oa_data,
+        "semanticscholar.org": {"openAccessPdf": {"url": "https://s2.org/s2.pdf"}},
+    }
+
+    class _TrioClient:
+        def get_json(self, url, **kw):
+            for k, v in _trio_table.items():
+                if k in url:
+                    return v
+            return None
+
+    class _TrioCtx:
+        def __init__(self):
+            self.client = _TrioClient(); self.cfg = _OACfg(); self.log = None; self.events = None
+
+    _tri = fast_oa_trio(Paper(doi="10.1/x"), _TrioCtx())
+    _tri_urls = [c.url for c in _tri]
+    assert "https://up.org/u.pdf" in _tri_urls and "https://s2.org/s2.pdf" in _tri_urls, _tri_urls
+    assert "https://oa.org/best.pdf" in _tri_urls and "https://oa.org/canonical.pdf" in _tri_urls, _tri_urls
+    assert _tri[0].url == "https://up.org/u.pdf", [(c.source, c.confidence) for c in _tri]  # 95 最高
+    assert len(_tri_urls) == len(set(_tri_urls)), _tri_urls                                 # 无重复 url
+
+    # ④ first_valid_pdf:注入 fetch → 取首个 %PDF;跳过非 PDF/无数据;命中即停;日志可读
+    class _CapLog:
+        def __init__(self): self.msgs = []
+        def info(self, fmt, *a): self.msgs.append((fmt % a) if a else fmt)
+
+    _served = {"https://miss.org/a.pdf": b"<html>login</html>",       # 非 PDF → 跳过
+               "https://ok.org/b.pdf": b"%PDF-1.6\nbytesbytes"}        # %PDF → 命中
+    _cands = [PdfCandidate("https://miss.org/a.pdf", "unpaywall", "pdf", None, None, 95),
+              PdfCandidate("https://ok.org/b.pdf", "openalex", "pdf", None, None, 72),
+              PdfCandidate("https://never.org/c.pdf", "core", "pdf", None, None, 68)]
+    _cap = _CapLog()
+    _hit, _data = first_valid_pdf(_cands, lambda u: _served.get(u), log=_cap)
+    assert _hit is not None and _hit.url == "https://ok.org/b.pdf" and _data.startswith(b"%PDF"), _hit
+    assert any("skip:not-pdf" in m for m in _cap.msgs), _cap.msgs
+    assert any("ok:%PDF" in m for m in _cap.msgs), _cap.msgs
+    assert not any("never.org" in m for m in _cap.msgs), "命中后不应继续尝试后续候选"
+    # 全非 PDF → (None, None)
+    assert first_valid_pdf(
+        [PdfCandidate("https://miss.org/a.pdf", "x", "pdf", None, None, 50)],
+        lambda u: _served.get(u)) == (None, None)
+    # fetch 抛异常被吞,继续下一个
+
+    def _boom(u):
+        if "boom" in u:
+            raise RuntimeError("net")
+        return _served.get(u)
+
+    _bh, _ = first_valid_pdf(
+        [PdfCandidate("https://boom.org/x.pdf", "x", "pdf", None, None, 90),
+         PdfCandidate("https://ok.org/b.pdf", "y", "pdf", None, None, 80)], _boom)
+    assert _bh is not None and _bh.url == "https://ok.org/b.pdf", _bh
 
     print("AGGREGATORS_OK")

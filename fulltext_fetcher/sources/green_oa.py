@@ -23,6 +23,7 @@
 """
 from __future__ import annotations
 
+import concurrent.futures
 import re
 from typing import Any, List, Optional
 
@@ -150,6 +151,47 @@ class ScienceOpen(BaseSource):
         return [PdfCandidate(url, self.name, "landing", None, None, 30)]
 
 
+# ── 147 五-补:并发绿色 OA 发现(最全 fallback 的绿仓层;承接《总评估-147》五-补)──
+# 与 aggregators.fast_oa_trio(免费三件套=最快)互补:此处并发查绿仓源(BASE + OSF),
+# 作 fallback 链「…→绿仓→…」的并发化实现。arXiv / PMC / EuropePMC / Zenodo / HAL 已由
+# repositories.py 覆盖,不在此重复;仅并发本模块的绿仓源,合并去重、按分降序。
+_GREEN_FAST_SOURCES = ("base", "osf")
+
+
+def _safe_green_find(src: BaseSource, paper: Paper, ctx: SourceContext) -> List[PdfCandidate]:
+    """调单源 find_candidates 并吞其自身异常(单源失败不拖垮并发批)。"""
+    try:
+        return src.find_candidates(paper, ctx) or []
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def fast_green_oa(paper: Paper, ctx: SourceContext, max_workers: int = 2) -> List[PdfCandidate]:
+    """并发查绿色 OA 仓储源(BASE + OSF),合并为去重、按分降序的候选(直链优先)。
+
+    单源异常/超时不影响其它源;仅做候选发现,取字节/验 %PDF 交由 download 层或
+    aggregators.first_valid_pdf(注入 fetch)完成。
+    """
+    from .base import REGISTRY
+    srcs = [REGISTRY[n]() for n in _GREEN_FAST_SOURCES if n in REGISTRY]
+    if not srcs:
+        return []
+    merged: List[PdfCandidate] = []
+    workers = max(1, min(max_workers, len(srcs)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = [ex.submit(_safe_green_find, s, paper, ctx) for s in srcs]
+        for fut in concurrent.futures.as_completed(futs):
+            merged.extend(fut.result())
+    best: dict = {}
+    for c in merged:
+        prev = best.get(c.url)
+        if prev is None or c.confidence > prev.confidence:
+            best[c.url] = c
+    uniq = list(best.values())
+    uniq.sort(key=lambda c: (0 if c.is_direct() else 1, -int(c.confidence or 0), c.source, c.url))
+    return uniq
+
+
 if __name__ == "__main__":  # 不联网 selftest: python -m fulltext_fetcher.sources.green_oa
     class _FakeClient:
         """按 URL 子串命中返回预置 JSON 的假客户端(不联网)。"""
@@ -218,5 +260,21 @@ if __name__ == "__main__":  # 不联网 selftest: python -m fulltext_fetcher.sou
     assert so[0].url == ("https://www.scienceopen.com/hosted-document?"
                          "doi=10.14293/S2199-1006.1.SOR-.PPTEST.v1"), so
     assert ScienceOpen().find_candidates(Paper(doi="10.1000/other"), _Ctx({})) == []
+
+    # ── 147 五-补:fast_green_oa 并发绿仓(BASE + OSF)合并去重、按分降序 ──
+    _fg_ctx = _Ctx({
+        _BASE_URL: {"response": {"docs": [
+            {"dcdoi": "10.1/x", "dcoa": "1", "dclink": "https://repo.org/full.pdf"}]}},
+        _OSF_URL: {"data": [{"id": "gid9", "relationships": {"primary_file": {"links": {
+            "related": {"href": "https://api.osf.io/v2/files/FILEID9/"}}}}}]},
+    })
+    _fg = fast_green_oa(Paper(doi="10.1/x"), _fg_ctx)
+    _fg_urls = [c.url for c in _fg]
+    assert "https://repo.org/full.pdf" in _fg_urls, _fg_urls        # BASE pdf(66)
+    assert "https://osf.io/download/FILEID9" in _fg_urls, _fg_urls  # OSF pdf(72)
+    assert len(_fg_urls) == len(set(_fg_urls)), _fg_urls            # 去重
+    assert _fg[0].url == "https://osf.io/download/FILEID9", [(c.source, c.confidence) for c in _fg]  # 72>66
+    # 无匹配 → 空(优雅降级);单源异常被吞不拖垮
+    assert fast_green_oa(Paper(doi="10.none/x"), _Ctx({})) == []
 
     print("GREEN_OA_OK")

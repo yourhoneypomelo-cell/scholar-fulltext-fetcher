@@ -9,14 +9,15 @@
   - 10.1038  Nature Portfolio     nature.com/articles/{suffix}.pdf
   - 10.1126  Science/AAAS         science.org/doi/pdf/{doi}
   - 10.1002/10.1111  Wiley        onlinelibrary.wiley.com/doi/pdf|pdfdirect/{doi}
-  - 10.1007/10.1140  Springer     link.springer.com/content/pdf/{doi}.pdf
+  - 10.1007/10.1140/10.1023/10.1134  Springer(含 Kluwer/Pleiades)  link.springer.com/content/pdf/{doi}.pdf
   - 10.1021  ACS                  pubs.acs.org/doi/pdf/{doi}
   - 10.1073  PNAS                 pnas.org/doi/pdf/{doi}
   - 10.1177  SAGE                 journals.sagepub.com/doi/pdf/{doi}
   - 10.1080  Taylor & Francis     tandfonline.com/doi/pdf/{doi}
   - 10.1039  RSC                  pubs.rsc.org/en/content/articlepdf/{year}/{journal}/{id}
   - 10.1103  APS(Physical Review) journals.aps.org/{jcode}/pdf/{doi}
-  - 10.1016  Elsevier             先查 Crossref 拿 PII → sciencedirect.com/science/article/pii/{pii}/pdfft
+  - 10.1016/10.1006  Elsevier     先查 Crossref 拿 PII → sciencedirect.com/science/article/pii/{pii}/pdfft
+  - 10.1039(遗留期 a/b/tf)  RSC     现代静态推不出者,经 Crossref resource.URL 取刊码+年 → articlepdf 直链
   - 10.3390  MDPI                 先查 Crossref 拿 ISSN/卷/期/文号 → mdpi.com/{issn}/{vol}/{issue}/{artno}/pdf
   - 另含 metapub FindIt 风格的 Atypon 系扩展(APS Physiology/AHA/Annual Reviews/Liebert/INFORMS/SIAM)
 
@@ -36,6 +37,7 @@ from __future__ import annotations
 
 import re
 from typing import Any, List, Optional, Tuple
+from urllib.parse import quote
 
 from ..models import Paper, PdfCandidate
 from .base import BaseSource, SourceContext, register
@@ -58,6 +60,13 @@ def _split_doi(d: str) -> Tuple[Optional[str], Optional[str]]:
     return (m.group(1), m.group(2)) if m else (None, None)
 
 
+def _wiley_doi_path(d: str) -> str:
+    prefix, suffix = _split_doi(d)
+    if not prefix or suffix is None:
+        return quote(d, safe="")
+    return f"{prefix}/{quote(suffix, safe='')}"
+
+
 # ── 简单模板社:直接 {doi} / 取 DOI 后缀即可稳定推直链 ──────────────────────
 # prefix → (name, confidence, (url 模板含 {doi} 占位, ...))
 _SIMPLE: dict = {
@@ -68,6 +77,10 @@ _SIMPLE: dict = {
                               "https://onlinelibrary.wiley.com/doi/pdfdirect/{doi}")),
     "10.1007": ("springer", 68, ("https://link.springer.com/content/pdf/{doi}.pdf",)),
     "10.1140": ("springer", 66, ("https://link.springer.com/content/pdf/{doi}.pdf",)),
+    # Springer 兄弟前缀:Kluwer(10.1023)/Pleiades(10.1134)均由 Springer 托管、同 content/pdf 路径
+    # (Crossref resource.primary.URL 落 link.springer.com 实证);老 Kluwer DOI 含冒号,模板保留原样。
+    "10.1023": ("springer", 66, ("https://link.springer.com/content/pdf/{doi}.pdf",)),
+    "10.1134": ("springer", 66, ("https://link.springer.com/content/pdf/{doi}.pdf",)),
     "10.1021": ("acs", 66, ("https://pubs.acs.org/doi/pdf/{doi}",)),
     "10.1073": ("pnas", 66, ("https://www.pnas.org/doi/pdf/{doi}",)),
     "10.1177": ("sage", 66, ("https://journals.sagepub.com/doi/pdf/{doi}",)),
@@ -97,6 +110,10 @@ _APS_JOURNALS: Tuple[Tuple[str, str], ...] = (
 # Elsevier PII(去分隔符后):S/B + 16 位(末位可为校验位 X)
 _PII_RE = re.compile(r"^[SB][0-9X]{16}$", re.I)
 _ISSN_RE = re.compile(r"^\d{4}-\d{3}[\dxX]$")
+
+# RSC 遗留期:老式 DOI 后缀不含刊代码(如 a905548g/b103225a/tf9221700607),_RSC_RE 无法解析;
+# 改从 Crossref resource.primary.URL(形如 https://pubs.rsc.org/cp/article/...)首段提刊代码。
+_RSC_RESOURCE_RE = re.compile(r"pubs\.rsc\.org/([a-z]{2})/article/", re.I)
 
 
 def _rsc(d: str, suffix: str) -> List[_Cand]:
@@ -130,9 +147,10 @@ def _static_for(prefix: str, d: str, suffix: str) -> List[_Cand]:
         return []
     name, conf, tmpls = spec
     out: List[_Cand] = []
+    doi_for_url = _wiley_doi_path(d) if name == "wiley" else d
     for t in tmpls:
         try:
-            out.append((t.format(doi=d), name, conf))
+            out.append((t.format(doi=doi_for_url), name, conf))
         except Exception:  # noqa: BLE001 - 模板异常不致命
             continue
     return out
@@ -183,6 +201,37 @@ def _mdpi(d: str, ctx: Any) -> List[_Cand]:
     return [(f"https://www.mdpi.com/{issn}/{vol}/{iss}/{art}/pdf", "mdpi", 60)]
 
 
+def _crossref_year(msg: dict) -> Optional[int]:
+    """从 Crossref message 取发表年(优先 published,回退 print/online/issued)。"""
+    for k in ("published", "published-print", "published-online", "issued"):
+        v = msg.get(k)
+        if isinstance(v, dict) and v.get("date-parts"):
+            try:
+                return int(v["date-parts"][0][0])
+            except Exception:  # noqa: BLE001 - 日期畸形不致命
+                pass
+    return None
+
+
+def _rsc_legacy(d: str, suffix: str, ctx: Any) -> List[_Cand]:
+    """RSC 遗留期(a/b/tf/8位c 等 _RSC_RE 无法解析者):老式 DOI 后缀不含刊代码、Crossref
+    alternative-id 亦空,故经一次 Crossref 从 resource.primary.URL 首段取刊代码 + published 取
+    年份,复用现代 articlepdf 同模板同域构造 PDF 直链。信心值 60(略低于现代静态 rsc=66:经
+    Crossref 推断、极老期路径存在性有残余不确定)。构造错也不产假成功(download.py %PDF 校验)。"""
+    msg = _crossref_message(d, ctx)
+    if not msg:
+        return []
+    res = ((msg.get("resource") or {}).get("primary") or {}).get("URL") or ""
+    m = _RSC_RESOURCE_RE.search(res)
+    if not m:
+        return []
+    year = _crossref_year(msg)
+    if not year:
+        return []
+    jcode = m.group(1).lower()
+    return [(f"https://pubs.rsc.org/en/content/articlepdf/{year}/{jcode}/{suffix.lower()}", "rsc", 60)]
+
+
 def _wrap(raw: List[_Cand]) -> List[PdfCandidate]:
     """(url,name,conf) 列表 → List[PdfCandidate];按 confidence 降序、去重保序。"""
     seen: set = set()
@@ -221,10 +270,12 @@ def build_pdf_candidates(doi: Any, ctx: Any = None) -> List[PdfCandidate]:
     raw: List[_Cand] = list(_static_for(prefix, d, suffix or ""))
     if ctx is not None:
         try:
-            if prefix == "10.1016":
+            if prefix in ("10.1016", "10.1006"):   # 10.1006=老 Elsevier(ScienceDirect),同 PII→/pdfft
                 raw += _elsevier(d, ctx)
             elif prefix == "10.3390":
                 raw += _mdpi(d, ctx)
+            elif prefix == "10.1039" and not raw:  # 现代 RSC 已由 _static_for 命中;此处只兜底遗留期
+                raw += _rsc_legacy(d, suffix or "", ctx)
         except Exception:  # noqa: BLE001 - 增强失败退回纯构造结果
             pass
     return _wrap(raw)
@@ -268,6 +319,16 @@ def _selftest() -> int:
     wu = urls("10.1002/adma.202000000")
     assert "https://onlinelibrary.wiley.com/doi/pdf/10.1002/adma.202000000" in wu
     assert any("pdfdirect" in x for x in wu), wu
+    _legacy_wiley = "10.1002/1099-0739(200012)14:12<836::AID-AOC97>3.0.CO;2-C"
+    _legacy_enc = _wiley_doi_path(_legacy_wiley)
+    wu_legacy = urls(_legacy_wiley)
+    assert f"https://onlinelibrary.wiley.com/doi/pdfdirect/{_legacy_enc}" in wu_legacy, wu_legacy
+    assert f"https://onlinelibrary.wiley.com/doi/pdf/{_legacy_enc}" in wu_legacy
+    assert ":12:" not in wu_legacy[0]
+
+    # ③b Springer 兄弟前缀:Kluwer(10.1023,含冒号)/ Pleiades(10.1134)复用 content/pdf 模板
+    assert "https://link.springer.com/content/pdf/10.1023/a:1015326726898.pdf" in urls("10.1023/a:1015326726898")
+    assert "https://link.springer.com/content/pdf/10.1134/s0036029512010132.pdf" in urls("10.1134/s0036029512010132")
 
     # ④ RSC:由后缀推 年份+刊代码(混合刊如 ee/cc 也构造——机构订阅可及)
     assert "https://pubs.rsc.org/en/content/articlepdf/2020/sc/d0sc01234b" in urls("10.1039/d0sc01234b")
@@ -310,6 +371,14 @@ def _selftest() -> int:
     assert els[0].source == "publisher_direct:elsevier"
     # 无 PII → 空
     assert build_pdf_candidates("10.1016/x", ctx=_Ctx({"message": {}})) == []
+    # ⑧b 老 Elsevier 10.1006:同 _elsevier PII→/pdfft 分支(前缀门已含 10.1006);无 ctx 纯构造仍空
+    els06 = build_pdf_candidates(
+        "10.1006/jcat.1993.1276",
+        ctx=_Ctx({"message": {"alternative-id": ["S0021951783712765"]}}))
+    assert els06 and els06[0].url == \
+        "https://www.sciencedirect.com/science/article/pii/S0021951783712765/pdfft", els06
+    assert els06[0].source == "publisher_direct:elsevier"
+    assert build_static_candidates("10.1006/jcat.1993.1276") == []
 
     # ⑨ MDPI:用假 client 从 Crossref 取 ISSN/卷/期/文号 → /pdf
     md = build_pdf_candidates(
@@ -319,6 +388,27 @@ def _selftest() -> int:
     assert md and md[0].url == "https://www.mdpi.com/2073-4344/16/3/270/pdf", md
     # 缺字段 → 空
     assert build_pdf_candidates("10.3390/x", ctx=_Ctx({"message": {"ISSN": ["2073-4344"]}})) == []
+
+    # ⑨b RSC 遗留期:_RSC_RE 解析不了(a/b/tf/8位c)→ 经 Crossref resource.URL 取刊码 + published 取年
+    rsc_leg = build_pdf_candidates(
+        "10.1039/a905548g",
+        ctx=_Ctx({"message": {
+            "resource": {"primary": {"URL": "https://pubs.rsc.org/cp/article/1/20/4909-4912/199139"}},
+            "published": {"date-parts": [[1999]]}}}))
+    assert rsc_leg and rsc_leg[0].url == \
+        "https://pubs.rsc.org/en/content/articlepdf/1999/cp/a905548g", rsc_leg
+    assert rsc_leg[0].source == "publisher_direct:rsc"
+    # tf 老期(Trans. Faraday Soc. 1922)同样可构造
+    tf = build_pdf_candidates(
+        "10.1039/tf9221700607",
+        ctx=_Ctx({"message": {
+            "resource": {"primary": {"URL": "https://pubs.rsc.org/tf/article/17/0/607-620/230602"}},
+            "published": {"date-parts": [[1922]]}}}))
+    assert tf and tf[0].url == "https://pubs.rsc.org/en/content/articlepdf/1922/tf/tf9221700607", tf
+    # resource.URL 无刊码 / 无年份 → 空(不误产)
+    assert build_pdf_candidates("10.1039/a905548g", ctx=_Ctx({"message": {}})) == []
+    # 现代 RSC 仍走纯静态、不因遗留分支多查 Crossref(_static_for 已产出 → not raw 为 False)
+    assert "https://pubs.rsc.org/en/content/articlepdf/2010/cp/c0cp00789g" in urls("10.1039/c0cp00789g")
 
     # ⑩ 机构开关:institutional=False → 适配器产 [];True → 有候选
     off = PublisherDirectSource().find_candidates(

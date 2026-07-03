@@ -50,6 +50,15 @@ class Config:
     # 输出
     out_dir: str = "out"
 
+    # ── 文件命名模板(可选;默认 None = 旧行为逐字节不变:DOI 净化名)──────────────────
+    # 默认 None → 主线落盘沿用 download.target_name 的 DOI 净化名(doi.replace('/','_') → sanitize_filename),
+    # 与本参数引入前完全一致(向后兼容,零副作用)。设为含占位符的模板串(如 "{year}_{author}_{title}"
+    # 或 "{year}_{author}_{title}_{doi}")→ 复用 scholar/naming.build_filename,按 resolve 出的 Paper 元数据
+    # (年 / 首作者姓 / 标题 / DOI / venue)渲染标准化、安全、去重后的文件名——净化/截断/去重逻辑与 scholar
+    # 子系统同源(不重造):字段缺失优雅降级(折叠空占位分隔符),年 / 作者 / 标题全缺时以 DOI 兜底;落盘时
+    # 按磁盘现存文件自动加 _2/_3 去重(模板名撞名概率高于唯一 DOI)。占位符:year/author/title/doi/venue。
+    naming_template: Optional[str] = None
+
     # 并发与网络
     concurrency: int = 4
     timeout: float = 30.0

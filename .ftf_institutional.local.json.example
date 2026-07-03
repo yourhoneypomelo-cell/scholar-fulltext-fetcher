@@ -1,0 +1,15 @@
+{
+  "_comment": "复制为 .ftf_institutional.local.json 并填入凭据;该文件已在 .gitignore 建议中,勿提交 git",
+  "enabled": false,
+  "provider": "ezproxy",
+  "ezproxy_prefix": "https://login.ezproxy.YOUR-UNI.edu/login?url=",
+  "institution_cookie": null,
+  "institution_domains": [
+    "sciencedirect.com",
+    "elsevier.com",
+    "pubs.acs.org",
+    "pubs.rsc.org",
+    "onlinelibrary.wiley.com"
+  ],
+  "cookie_store_path": ".ftf_cookies.local.json"
+}

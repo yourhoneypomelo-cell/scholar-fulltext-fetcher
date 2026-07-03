@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import re
 from typing import Any, List, Optional, Tuple
+from urllib.parse import quote
 
 from ..models import PdfCandidate
 
@@ -41,6 +42,14 @@ def _normalize_doi(doi: Any) -> str:
 def _split_doi(d: str):
     m = _DOI_SPLIT_RE.match(d)
     return (m.group(1), m.group(2)) if m else (None, None)
+
+
+def _wiley_doi_path(d: str) -> str:
+    """Wiley /doi/pdf(direct)/ 路径：保留 prefix/suffix 间 `/`，仅 encode 后缀特殊字符。"""
+    prefix, suffix = _split_doi(d)
+    if not prefix or suffix is None:
+        return quote(d, safe="")
+    return f"{prefix}/{quote(suffix, safe='')}"
 
 
 # ══════════════════════ 全 OA 社:纯 DOI 稳定直链 ══════════════════════
@@ -169,7 +178,12 @@ def _acs(d: str, suf: str) -> List[_Cand]:
 
 def _wiley_openonline(d: str, suf: str) -> List[_Cand]:
     # OnlineOpen 条件 OA;pdfdirect 对 OA 文章可直取、订阅文章 403 → 低分(与 publisher_adapter 重叠)
-    return [(f"https://onlinelibrary.wiley.com/doi/pdfdirect/{d}", "pdf", 42, "wiley-onlineopen")]
+    # 遗留 Wiley DOI 含 ( ) : < > ; 等,后缀须 percent-encode,否则 pdfdirect 404/截断。
+    enc = _wiley_doi_path(d)
+    return [
+        (f"https://onlinelibrary.wiley.com/doi/pdfdirect/{enc}", "pdf", 42, "wiley-onlineopen"),
+        (f"https://onlinelibrary.wiley.com/doi/pdf/{enc}", "pdf", 42, "wiley-onlineopen"),
+    ]
 
 
 def _mdpi(d: str, suf: str) -> List[_Cand]:
@@ -180,6 +194,11 @@ def _mdpi(d: str, suf: str) -> List[_Cand]:
 
 def _hindawi(d: str, suf: str) -> List[_Cand]:
     return [(f"https://doi.org/{d}", "landing", 42, "hindawi")]
+
+
+def _sciopen(d: str, suf: str) -> List[_Cand]:
+    # SciOpen(Tsinghua Univ Press OA 平台):PDF 直链稳定为 /article/pdf/{doi}(.pdf 亦可)
+    return [(f"https://www.sciopen.com/article/pdf/{d}", "pdf", 72, "sciopen")]
 
 
 # DOI 前缀 → builder
@@ -197,6 +216,7 @@ _BUILDERS = {
     "10.3762": _beilstein,                                        # Beilstein(全 OA)
     "10.3390": _mdpi,                                            # MDPI(全 OA,无纯模板→落地)
     "10.1155": _hindawi,                                         # Hindawi(全 OA,无纯模板→落地)
+    "10.26599": _sciopen,                                        # SciOpen/Tsinghua OA 平台
     "10.1039": _rsc,                                             # RSC(仅金 OA 刊构造直链)
     "10.1088": _iop,                                             # IOP(仅金 OA 刊构造直链)
     "10.1021": _acs,                                             # ACS(金 OA 高分,其余低分)
@@ -206,7 +226,7 @@ _BUILDERS = {
 
 COVERED_PUBLISHERS = (
     "Frontiers", "PLOS", "PeerJ", "eLife", "BMC", "Springer", "Nature Portfolio(OA 子刊)",
-    "PNAS", "Copernicus", "Beilstein", "MDPI", "Hindawi", "RSC(金 OA)", "IOP(金 OA)",
+    "PNAS", "Copernicus", "Beilstein", "MDPI", "Hindawi", "SciOpen", "RSC(金 OA)", "IOP(金 OA)",
     "ACS(AuthorChoice/金 OA)", "Wiley(OnlineOpen)",
 )
 
@@ -299,11 +319,20 @@ def _selftest() -> int:
     # ⑦ Wiley OnlineOpen / MDPI / Beilstein / Copernicus / Hindawi
     assert first("10.1002/adma.202000000").url == \
         "https://onlinelibrary.wiley.com/doi/pdfdirect/10.1002/adma.202000000"
+    _legacy_wiley = "10.1002/1099-0739(200012)14:12<836::AID-AOC97>3.0.CO;2-C"
+    _legacy_enc = _wiley_doi_path(_legacy_wiley)
+    _wiley_legacy_urls = urls(_legacy_wiley)
+    assert _wiley_legacy_urls[0] == f"https://onlinelibrary.wiley.com/doi/pdfdirect/{_legacy_enc}", _wiley_legacy_urls
+    assert "https://onlinelibrary.wiley.com/doi/pdf/" + _legacy_enc in _wiley_legacy_urls
+    assert ":12:" not in _wiley_legacy_urls[0] and "%3A" in _wiley_legacy_urls[0]
     assert urls("10.3390/catal16030270") == ["https://doi.org/10.3390/catal16030270"]  # MDPI→落地
     assert first("10.3390/catal16030270").kind == "landing"
     assert first("10.3762/bjoc.16.113").confidence == 55                     # Beilstein 金 OA
     assert urls("10.5194/acp-20-1-2020") == [
         "https://acp.copernicus.org/articles/20/1/2020/acp-20-1-2020.pdf"]
+    assert first("10.26599/nr.2025.94907426").url == \
+        "https://www.sciopen.com/article/pdf/10.26599/nr.2025.94907426"
+    assert first("10.26599/nr.2025.94907426").source == "publisher_oa:sciopen"
 
     # ⑧ DOI 归一化 / 未知前缀 / 空 → 契约
     assert first(" DOI:10.7717/peerj.42 ").url == "https://peerj.com/articles/42.pdf"

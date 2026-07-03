@@ -112,6 +112,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--email", default=os.environ.get("FULLTEXT_EMAIL", ""),
                    help="联系邮箱(Unpaywall 必需真实邮箱;OpenAlex/Crossref 礼貌池)")
     p.add_argument("-o", "--out", default="out", help="输出目录(默认 out)")
+    p.add_argument("--naming-template", default=os.environ.get("FULLTEXT_NAMING_TEMPLATE"),
+                   help="可选文件命名模板(默认不给=DOI 净化名,落盘行为逐字节不变)。给含占位符的模板串即启用"
+                        "标准化命名,复用 scholar 命名逻辑(净化/截断/去重同源、不重造):占位符 "
+                        "{year}/{author}/{title}/{doi}/{venue},如 \"{year}_{author}_{title}\" 或 "
+                        "\"{year}_{author}_{title}_{doi}\";字段缺失优雅降级、年作者标题全缺时以 DOI 兜底"
+                        "(默认取环境变量 FULLTEXT_NAMING_TEMPLATE)")
     p.add_argument("-c", "--concurrency", type=int, default=4, help="并发输入数(默认 4)")
     p.add_argument("--timeout", type=float, default=30.0, help="单请求超时秒(默认 30)")
     p.add_argument("--max-retries", type=int, default=3, help="429/5xx 重试次数(默认 3)")
@@ -142,7 +148,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "配置后 DOI 先走本地、零额度零限速")
     p.add_argument("--institutional", action="store_true",
                    help="启用机构订阅直链源 publisher_direct(对订阅/混合出版商也构造 PDF 直链)。"
-                        "仅供拥有合法机构订阅、对内容有访问权者使用;无订阅时直链会 401/403 被 %PDF 校验过滤")
+                        "亦可设 FTF_INSTITUTIONAL=1 或 .ftf_institutional.local.json(见 .example);"
+                        "仅供拥有合法机构订阅、对内容有访问权者使用;无订阅时直链会 401/403 被 %%PDF 校验过滤")
     # 机构订阅三件套(默认全空 → 行为与未启用逐字节一致;详见 机构订阅集成设计.md)。
     # Cookie/前缀建议走环境变量而非命令行明文,避免留在 shell 历史里。
     p.add_argument("--ezproxy-prefix", default=os.environ.get("EZPROXY_PREFIX"),
@@ -192,6 +199,7 @@ def main(argv: List[str] | None = None) -> int:
         core_key=args.core_key,
         snapshot_db=args.snapshot_db,
         out_dir=args.out,
+        naming_template=(args.naming_template or None),
         concurrency=args.concurrency,
         timeout=args.timeout,
         max_retries=args.max_retries,
@@ -213,6 +221,8 @@ def main(argv: List[str] | None = None) -> int:
         log_level=args.log_level,
     )
     cfg.apply_route_b()          # 据 --route-b 派生 browser_capture / browser_pdf_download(单一真源)
+    from .institutional import bootstrap_institutional_config
+    inst_sess = bootstrap_institutional_config(cfg, cli_institutional=args.institutional)
     if args.sources:
         cfg.sources = [s.strip() for s in args.sources.split(",") if s.strip()]
     # 机构模式:把 publisher_direct 接入源顺序(置于免费 OA 源之后、兜底 websearch 之前);
@@ -228,7 +238,10 @@ def main(argv: List[str] | None = None) -> int:
         pipe.log.warning("未提供真实邮箱:Unpaywall 可能返回 422,建议加 --email you@uni.edu")
     if cfg.institutional:
         pipe.log.warning("已启用机构订阅直链源 publisher_direct:仅供拥有合法机构订阅、"
-                         "对内容有访问权者使用;无订阅的直链会 401/403 被 %PDF 校验过滤。")
+                         "对内容有访问权者使用;无订阅的直链会 401/403 被 PDF 魔数校验过滤。")
+        cred = inst_sess.credentials
+        if cred and cred.enabled and not args.institutional:
+            pipe.log.info("机构凭据自 FTF 加载(source=%s, provider=%s)", cred.source, cred.provider)
     if cfg.enable_scihub:
         pipe.log.warning("注意:已启用 Sci-Hub 兜底,存在合规/法律风险,使用者自负。")
     if cfg.browser_capture or cfg.browser_pdf_download:
@@ -344,6 +357,23 @@ def _selftest() -> int:
     a3 = parser.parse_args(["10.1/x", "--route-b", "all", "--browser-headless",
                             "--browser-pdf-wait", "20"])
     assert a3.route_b == "all" and a3.browser_headless is True and a3.browser_pdf_wait == 20.0, vars(a3)
+
+    # ⑦ 文件命名模板(主线自定义命名打通):默认不给→None(旧 DOI 净化名,逐字节不变);给模板→透传 Config;env 兜底
+    assert _Cfg().naming_template is None, "Config 默认命名模板必须为 None(向后兼容)"
+    _prev_nt = os.environ.pop("FULLTEXT_NAMING_TEMPLATE", None)
+    try:
+        assert build_parser().parse_args(["10.1/x"]).naming_template is None, "默认不给 → None(行为不变)"
+        a_nt = build_parser().parse_args(["10.1/x", "--naming-template", "{year}_{author}_{title}"])
+        assert a_nt.naming_template == "{year}_{author}_{title}", a_nt.naming_template
+        assert _Cfg(naming_template=(a_nt.naming_template or None)).naming_template == \
+            "{year}_{author}_{title}", a_nt.naming_template
+        os.environ["FULLTEXT_NAMING_TEMPLATE"] = "{doi}"
+        assert build_parser().parse_args(["10.1/x"]).naming_template == "{doi}", "env FULLTEXT_NAMING_TEMPLATE 应作默认值"
+    finally:
+        if _prev_nt is None:
+            os.environ.pop("FULLTEXT_NAMING_TEMPLATE", None)
+        else:
+            os.environ["FULLTEXT_NAMING_TEMPLATE"] = _prev_nt
 
     print("CLI_OK")
     return 0

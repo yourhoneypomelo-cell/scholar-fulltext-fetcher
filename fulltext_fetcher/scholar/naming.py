@@ -282,4 +282,15 @@ if __name__ == "__main__":  # 离线 selftest: python -m fulltext_fetcher.schola
         pp = dedupe_path(d, "../../evil.pdf")
         assert os.path.dirname(pp) == d and "evil" in os.path.basename(pp), pp
 
+    # ⑭ 特殊字符 DOI(老 Wiley,含 ( ) : < > ;)→ build_filename 合法且可真落盘(不抛 [Errno 22])
+    _wiley = "10.1002/1099-0739(200012)14:12<715::AID-RCM4>3.0.CO;2-A"
+    _win_illegal = set('<>:"/\\|?*')
+    fn14 = build_filename(ScholarResult(doi=_wiley), None, cfg)
+    assert not (_win_illegal & set(fn14)), fn14
+    assert fn14 == "10.1002_1099-0739_200012_14_12_715_AID-RCM4_3.0.CO_2-A.pdf", fn14
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, fn14), "wb") as _fh:    # Windows 真落盘:非法字符未清则报 [Errno 22]
+            _fh.write(b"%PDF-1.4\n%%EOF\n")
+    assert slugify('a<b>c:d"e|f*g?h') == "a_b_c_d_e_f_g_h", slugify('a<b>c:d"e|f*g?h')
+
     print("NAMING_OK")
