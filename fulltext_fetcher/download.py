@@ -1118,6 +1118,25 @@ def _static_pdf_fallbacks(doi, article_url):
         return []
 
 
+def _route_b_injection_plan_for(cfg, url):
+    """A5:据 cfg(机构订阅字段)+ 目标 URL 构造 route-B 注入计划(纯数据、离线)。
+
+    命中机构白名单(``needs_institution_access`` 同口径)时返回 ``RouteBInjectionPlan``,供
+    ``render_download_pdf_bytes(injection_plan=)`` 在浏览器会话内注入机构 Cookie / EZproxy 改写;
+    无凭据 / host 未命中 / 缺 institutional 包 → ``None``(零副作用,与未启用逐字节一致)。
+    """
+    if not getattr(cfg, "institutional", False):
+        return None
+    try:
+        from .institutional.route_b_bridge import plan_route_b_injection_from_config
+    except ImportError:
+        return None
+    try:
+        return plan_route_b_injection_from_config(cfg, url)
+    except Exception:  # noqa: BLE001 - 注入计划构造异常绝不阻断 route-B 主路径
+        return None
+
+
 def _browser_capture_fallback(
     candidate, paper, pdf_dir, cfg, log, fallback_name,
     *, events=None, _render_fn=None,
@@ -1156,9 +1175,14 @@ def _browser_capture_fallback(
     pdf_url_fallbacks = _static_pdf_fallbacks(getattr(paper, "doi", None), url)
     out_dir = getattr(cfg, "out_dir", None) or "out"
     lock_path = os.path.join(out_dir, ".route_b.lock")
+    # A5(路线B 断线补齐):命中机构白名单时构造注入计划(机构 Cookie + EZproxy 改写),随 render 在
+    # 【同一 nodriver 会话】内注入(与 B1 同 JA3),让 RSC/ACS/Wiley/ScienceDirect 等 JA3 绑定强 CF 站
+    # 在 route-B 上也带机构会话取全文。无凭据 / host 未命中白名单 → None,与未启用逐字节一致(零副作用)。
+    injection_plan = _route_b_injection_plan_for(cfg, url)
     try:
         res = render(url, timeout=timeout, min_interval=0.0, headless=headless,
-                     pdf_url_fallbacks=pdf_url_fallbacks, lock_path=lock_path)
+                     pdf_url_fallbacks=pdf_url_fallbacks, lock_path=lock_path,
+                     injection_plan=injection_plan)
     except Exception as e:  # noqa: BLE001
         log.info("browser-capture 抓字节异常(忽略) %s: %s", url, e)
         return None
@@ -1862,6 +1886,34 @@ def _selftest() -> None:
                 in _bc_kw.get("pdf_url_fallbacks", []), _bc_kw
             # 单头串行护栏:锁路径落在 out_dir 下的 .route_b.lock
             assert _bc_kw.get("lock_path") == os.path.join(d, ".route_b.lock"), _bc_kw
+            # A5(路线B 断线补齐):非机构 cfg → 不构造注入计划(injection_plan=None,零副作用)
+            assert _bc_kw.get("injection_plan") is None, _bc_kw
+
+        # A5 接线:机构 cfg + host 命中白名单 → render 收到非空 injection_plan(Cookie 就位、宿主正确);
+        #          未命中白名单 → None(route-A/route-B 同门)。仅验 cfg→plan 是否随 render 传入,不发真下载。
+        class _BCInstCfg(_BCCfg):
+            institutional = True
+            institution_cookie = "ezproxy=SELFTESTTOK; sid=xyz"
+            institution_domains = ["rsc.org"]
+            ezproxy_prefix = "https://login.ezproxy.test.edu/login?url="
+
+        with tempfile.TemporaryDirectory() as d:
+            _dl._browser_capture_fallback(
+                _SelfCand("https://pubs.rsc.org/en/content/articlepdf/2022/cc/d2cc00208f"),
+                _BCPaper(), d, _BCInstCfg(), log, "bc_inst", _render_fn=_fake_bc_render)
+            _ip = _bc_kw.get("injection_plan")
+            assert _ip is not None and _ip.cookie_count() >= 1, _bc_kw
+            assert _ip.rewrite_target_host == "pubs.rsc.org", _ip
+            assert _ip.ezproxy_prefix == "https://login.ezproxy.test.edu/login?url=", _ip
+
+        class _BCInstMissCfg(_BCInstCfg):
+            institution_domains = ["elsevier.com"]        # host 未命中 → 不注入
+
+        with tempfile.TemporaryDirectory() as d:
+            _dl._browser_capture_fallback(
+                _SelfCand("https://pubs.rsc.org/en/content/articlepdf/2022/cc/d2cc00208f"),
+                _BCPaper(), d, _BCInstMissCfg(), log, "bc_inst_miss", _render_fn=_fake_bc_render)
+            assert _bc_kw.get("injection_plan") is None, _bc_kw
 
         # 无 DOI 的 paper → 无直链兜底(pdf_url_fallbacks 为空);抽不出正文(扫描)→ QC uncertain 放行落盘
         _dl._extract_pdf_text_meta = lambda data, *a, **k: (None, "")

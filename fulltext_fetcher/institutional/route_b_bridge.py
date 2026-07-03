@@ -86,17 +86,67 @@ def plan_route_b_injection(
 
     if not plan.cookies and cred.institution_cookie:
         # 解析 "k=v; k2=v2" → 按 target host 注入(域缺省用 host)
-        for part in cred.institution_cookie.split(";"):
-            part = part.strip()
-            if "=" not in part:
-                continue
-            name, value = part.split("=", 1)
-            plan.cookies.append(BrowserCookieSpec(
-                name=name.strip(), value=value.strip(), domain=host or ".",
-            ))
+        plan.cookies.extend(_cookie_specs_from_header(cred.institution_cookie, host))
 
     plan.notes = (
         f"inject {plan.cookie_count()} cookie(s) for {host}; "
         "render_fetch owner implements inject_institutional_session()"
     )
+    return plan
+
+
+def _cookie_specs_from_header(cookie_header: str, host: str) -> List[BrowserCookieSpec]:
+    """把 "k1=v1; k2=v2" Cookie 头串解析为 BrowserCookieSpec 列表(域缺省用 host)。"""
+    specs: List[BrowserCookieSpec] = []
+    for part in (cookie_header or "").split(";"):
+        part = part.strip()
+        if "=" not in part:
+            continue
+        name, value = part.split("=", 1)
+        specs.append(BrowserCookieSpec(
+            name=name.strip(), value=value.strip(), domain=host or ".",
+        ))
+    return specs
+
+
+def plan_route_b_injection_from_config(
+    cfg,
+    target_url: str,
+    *,
+    user_agent: Optional[str] = None,
+) -> Optional[RouteBInjectionPlan]:
+    """从 ``Config``(机构订阅字段)直接生成 route-B 注入计划(纯数据、离线、零副作用)。
+
+    供 ``download._browser_capture_fallback`` 在 route-B 兜底浏览器抓字节前构造:命中机构白名单时
+    把机构 Cookie/EZproxy 前缀装进 ``RouteBInjectionPlan``,随 ``render_download_pdf_bytes(injection_plan=)``
+    在【同一 nodriver 会话】内注入(与 B1 同 JA3),从而让 RSC/ACS/Wiley/ScienceDirect 等 JA3 绑定型
+    强 CF 站在 route-B 上也能带机构会话取用全文。
+
+    与路线A(``http_client``)口径一致:仅当配置了机构凭据(``ezproxy_prefix`` 或 ``institution_cookie``)
+    且 target host 命中 ``institution_domains`` 白名单(``needs_institution_access``)时产出非空 plan;
+    否则返回 ``None``——与未启用机构订阅时逐字节一致(浏览器路径不注入任何 Cookie/不改写 URL)。
+    """
+    if cfg is None:
+        return None
+    ezproxy_prefix = getattr(cfg, "ezproxy_prefix", None)
+    institution_cookie = getattr(cfg, "institution_cookie", None)
+    if not ezproxy_prefix and not institution_cookie:
+        return None
+    host = urlparse(target_url).hostname or ""
+    # 复用路线A 的机构白名单守卫:未配置/OA 域/未命中白名单 → 恒 False,不注入(零副作用、与 http_client 同口径)。
+    try:
+        from ..http_client import needs_institution_access
+    except ImportError:
+        return None
+    if not needs_institution_access(host, cfg):
+        return None
+
+    plan = RouteBInjectionPlan(
+        provider="manual", user_agent=user_agent,
+    )
+    plan.ezproxy_prefix = ezproxy_prefix
+    plan.rewrite_target_host = host
+    if institution_cookie:
+        plan.cookies.extend(_cookie_specs_from_header(institution_cookie, host))
+    plan.notes = f"cfg-derived inject {plan.cookie_count()} cookie(s) for {host}"
     return plan

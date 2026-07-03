@@ -9,7 +9,12 @@
 """
 from .auth_session import AuthSession, AuthProvider, bootstrap_institutional_config
 from .credential_store import InstitutionalCredentials, load_credentials, apply_credentials_to_config
-from .route_b_bridge import BrowserCookieSpec, RouteBInjectionPlan, plan_route_b_injection
+from .route_b_bridge import (
+    BrowserCookieSpec,
+    RouteBInjectionPlan,
+    plan_route_b_injection,
+    plan_route_b_injection_from_config,
+)
 
 # 注:assisted_auth 走 `python -m ...assisted_auth` 跑内置 selftest(与 selftest_a5_framework 同款),
 # 故【不在此 eager import】以免 runpy 的双导入 RuntimeWarning;消费方用显式子模块路径:
@@ -25,4 +30,5 @@ __all__ = [
     "BrowserCookieSpec",
     "RouteBInjectionPlan",
     "plan_route_b_injection",
+    "plan_route_b_injection_from_config",
 ]

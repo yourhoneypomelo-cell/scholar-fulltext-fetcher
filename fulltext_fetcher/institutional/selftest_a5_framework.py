@@ -11,7 +11,7 @@ def _selftest() -> int:
     from .auth_session import AuthSession, AuthProvider
     from .cookie_store import CookieStore, StoredCookie
     from .credential_store import load_credentials, apply_credentials_to_config
-    from .route_b_bridge import plan_route_b_injection
+    from .route_b_bridge import plan_route_b_injection, plan_route_b_injection_from_config
 
     # ① 无 env/文件 → disabled
     os.environ.pop("FTF_INSTITUTIONAL", None)
@@ -73,6 +73,41 @@ def _selftest() -> int:
         assert plan.cookie_count() >= 1
         assert plan.rewrite_target_host == "www.sciencedirect.com"
         assert "inject" in plan.notes
+
+    # ⑤b route-B 注入计划从 Config 直接生成(download._browser_capture_fallback 兜底用;A5 路线B 断线补齐)
+    #     与路线A(http_client.needs_institution_access)同口径:命中白名单→非空 plan,否则 None(零副作用)。
+    sd_url = "https://www.sciencedirect.com/science/article/pii/S1/pdfft"
+    # (a) 默认 Config(无机构凭据)→ None,与未启用逐字节一致
+    assert plan_route_b_injection_from_config(Config(), sd_url) is None
+    # (b) 启用机构订阅 + cookie + 命中白名单 → 非空 plan(cookie 全解析 + EZproxy 前缀 + 改写 host)
+    cfg_inst = Config(
+        institutional=True,
+        ezproxy_prefix="https://login.ezproxy.test.edu/login?url=",
+        institution_cookie="ezproxy=SECRETTOK; sid=abc",
+        institution_domains=["sciencedirect.com"],
+    )
+    plan_sd = plan_route_b_injection_from_config(cfg_inst, sd_url, user_agent="Mozilla/5.0 test")
+    assert plan_sd is not None and plan_sd.cookie_count() == 2, plan_sd
+    assert plan_sd.ezproxy_prefix.startswith("https://login.ezproxy"), plan_sd
+    assert plan_sd.rewrite_target_host == "www.sciencedirect.com", plan_sd
+    assert plan_sd.user_agent == "Mozilla/5.0 test", plan_sd          # UA 透传(与浏览器抓字节同指纹)
+    assert {c.name for c in plan_sd.cookies} == {"ezproxy", "sid"}, plan_sd.cookies  # cookie 全解析,供属主注入
+    # (c) host 未命中白名单 → None(与 needs_institution_access 同口径,不误改写无关域)
+    assert plan_route_b_injection_from_config(cfg_inst, "https://example.org/x.pdf") is None
+    # (d) 配了凭据但白名单为空 → 骨架保守 None(未显式白名单不主动改写,零副作用)
+    cfg_nowl = Config(
+        institutional=True,
+        ezproxy_prefix="https://login.ezproxy.test.edu/login?url=",
+        institution_cookie="ezproxy=T",
+    )
+    assert plan_route_b_injection_from_config(cfg_nowl, sd_url) is None
+    # (e) 开放 API 域即便被误列白名单也永不经机构通道 → None(防机构会话外泄第三方)
+    cfg_oa = Config(
+        institutional=True,
+        institution_cookie="ezproxy=T",
+        institution_domains=["api.crossref.org"],
+    )
+    assert plan_route_b_injection_from_config(cfg_oa, "https://api.crossref.org/works/x") is None
 
     # ⑥ SSO URL 启发式
     assert AuthSession.url_looks_logged_in("https://www.sciencedirect.com/science/article/pii/X")
