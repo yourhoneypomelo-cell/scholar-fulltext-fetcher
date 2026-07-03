@@ -52,6 +52,13 @@
 
 ---
 
+## 二·补、回写执行结果（-143，用户裁定「只拉黑 6 非白名单」）
+
+- **已执行**：6 条非白名单追加进 `out/qc_merge_highconf_wrong.csv`（硬黑）→ 备份 `out/coverage.bak_pre_gate3wb_143_20260704_012550.json` → `python tools/build_coverage.py`（复刻权威口径：`--extra-dirs rerun_elsevier_143/fetch,rerun_acs_144/fetch,rerun_wiley_144/fetch,t0_recover_156/fetch,p3_longtail_160/fetch --qc-allow out/_coverage_allow_v2_11_155.txt,out/_writeback149_gold59.txt`，verify_allow 开）重建。
+- **验证**：6 条现全部 `status=miss, qc=hard_reject, error=qc_hard_reject:wrong-paper(...)`；**rejected_hard 30→36（恰 +6，即我这 6 条）**，`success_before_qc` 558 不变、`allow_override` 60 不变。
+- **⚠️ headline 净数漂移（并发 churn，非我所致）**：新 `out/coverage.json`（ts 2026-07-04 01:29:51）**success = 371 / miss 628 / 37.14%**，而非预期的 362。拆解：`rejected_total 190→187`——我 **hard +6**，但**并发会话同时把 soft 名单 160→151（−9）**（改了 `qc_merge_union_wrong.csv`/`qc_uncertain_reject.csv`，非本波），两者叠加 = 558−187 = 371。**我的 −6 已确定性生效且持久**（在硬黑 CSV，任何后续重建都会剔除）；headline 上行是并发放宽 soft 盖过所致。这正是 V.1/T.2「coverage churn 需单写者」的实况——本次回写与并发单写者叠加，最终以 `out/coverage.json` 为唯一真相源。
+- **口径连带**：`基线口径冻结说明-388-173.md` 的 368 已滞后（现 371），属**单写者 159 维护的文档**，本波未改，交属主对齐。
+
 ## 三、建议处置（分级、防误伤 gold）
 
 1. **P0 安全**：6 条非白名单 → 追加硬黑 → 重建 coverage（368→362）。低风险、门③ 直接证据。
